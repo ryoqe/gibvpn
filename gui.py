@@ -89,6 +89,8 @@ class GibVPNApp(QMainWindow):
         self.active_subscription_index = 0
         self.autostart_enabled = False
         self.auto_reconnect = False
+        self.use_system_proxy = True
+        self._system_proxy_snapshot = None
         self.sub_auto_update_hours = 24
         self._sub_update_running = False
 
@@ -128,6 +130,8 @@ class GibVPNApp(QMainWindow):
         self.show_dialog_signal.connect(self._show_dialog_slot)
 
         self.load_settings()
+        if appcore.recover_windows_system_proxy():
+            self.log("[SYSTEM] После прошлого завершения восстановлены настройки прокси Windows")
         self._setup_tray()
         self._setup_hotkeys()
 
@@ -1324,6 +1328,13 @@ class GibVPNApp(QMainWindow):
             time.sleep(0.2)
 
         self.xray_process = self._spawn_xray()
+        if self.use_system_proxy:
+            try:
+                self._system_proxy_snapshot = appcore.enable_windows_system_proxy()
+                appcore.save_windows_system_proxy_backup(self._system_proxy_snapshot)
+                self.log("[SYSTEM] Прокси Windows включён: 127.0.0.1:10809")
+            except OSError as exc:
+                self.log(f"[SYSTEM] Не удалось включить прокси Windows: {exc}")
         self.is_running = True
         self.log(f"[CORE] Final xray PID: {self.xray_process.pid}")
         self.log(f"[CORE] SOCKS inbound: 127.0.0.1:10808")
@@ -1424,6 +1435,15 @@ class GibVPNApp(QMainWindow):
         if self.xray_process:
             self._reap_xray(self.xray_process)
             self.xray_process = None
+        if self._system_proxy_snapshot is not None:
+            try:
+                appcore.restore_windows_system_proxy(self._system_proxy_snapshot)
+                appcore.clear_windows_system_proxy_backup()
+                self.log("[SYSTEM] Восстановлены прежние настройки прокси Windows")
+            except OSError as exc:
+                self.log(f"[SYSTEM] Не удалось восстановить прокси Windows: {exc}")
+            finally:
+                self._system_proxy_snapshot = None
         if self.zapret_process or self.use_zapret:
             stop_zapret_process(self.zapret_process)
             self.zapret_process = None
@@ -1967,6 +1987,7 @@ class GibVPNApp(QMainWindow):
                 self.current_mode = data.get("current_mode", "min")
                 self.sub_auto_update_hours = data.get("sub_auto_update_hours", 24)
                 self.block_quic = data.get("block_quic", True)
+                self.use_system_proxy = data.get("use_system_proxy", True)
 
                 self.use_zapret = data.get("use_zapret", False)
                 self.zapret_dir = data.get("zapret_dir", self.zapret_dir)
@@ -2022,6 +2043,7 @@ class GibVPNApp(QMainWindow):
             "autostart_enabled": self.autostart_enabled,
             "sub_auto_update_hours": self.sub_auto_update_hours,
             "block_quic": self.block_quic,
+            "use_system_proxy": self.use_system_proxy,
             "use_zapret": getattr(self, "use_zapret", False),
             "zapret_dir": getattr(self, "zapret_dir", ""),
             "zapret_preset": getattr(self, "zapret_preset", "general.bat"),

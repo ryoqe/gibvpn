@@ -96,6 +96,98 @@ def get_work_dir(app_dir):
 APP_DIR = get_app_dir()
 WORK_DIR = get_work_dir(APP_DIR)
 
+# Only these per-user Internet Settings values are touched by the optional
+# system-proxy mode.  WinHTTP is deliberately never changed.
+SYSTEM_PROXY_VALUES = (
+    "ProxyEnable", "ProxyServer", "ProxyOverride", "AutoConfigURL", "AutoDetect",
+)
+SYSTEM_PROXY_BACKUP_PATH = os.path.join(APP_DIR, "system_proxy_backup.json")
+
+
+def read_windows_system_proxy():
+    """Return exactly the Internet Settings values that GibVPN may change."""
+    import winreg
+    key_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+    snapshot = {}
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ) as key:
+        for name in SYSTEM_PROXY_VALUES:
+            try:
+                value, value_type = winreg.QueryValueEx(key, name)
+                snapshot[name] = {"exists": True, "value": value, "type": value_type}
+            except FileNotFoundError:
+                snapshot[name] = {"exists": False}
+    return snapshot
+
+
+def restore_windows_system_proxy(snapshot):
+    """Restore a prior snapshot without touching unrelated proxy settings."""
+    import winreg
+    if not snapshot:
+        return
+    key_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+        for name in SYSTEM_PROXY_VALUES:
+            item = snapshot.get(name, {"exists": False})
+            if item.get("exists"):
+                winreg.SetValueEx(key, name, 0, item["type"], item["value"])
+            else:
+                try:
+                    winreg.DeleteValue(key, name)
+                except FileNotFoundError:
+                    pass
+
+
+def enable_windows_system_proxy(server="127.0.0.1:10809"):
+    """Enable a user-level Windows proxy and return its restorable old state."""
+    import winreg
+    snapshot = read_windows_system_proxy()
+    key_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+        winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
+        winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, server)
+        winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ, "<local>;localhost;127.0.0.1;::1")
+        winreg.SetValueEx(key, "AutoDetect", 0, winreg.REG_DWORD, 0)
+        try:
+            winreg.DeleteValue(key, "AutoConfigURL")
+        except FileNotFoundError:
+            pass
+    return snapshot
+
+
+def save_windows_system_proxy_backup(snapshot):
+    """Persist a backup so a later launch can recover after a crash."""
+    import json
+    temp_path = SYSTEM_PROXY_BACKUP_PATH + ".tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(snapshot, handle)
+    os.replace(temp_path, SYSTEM_PROXY_BACKUP_PATH)
+
+
+def clear_windows_system_proxy_backup():
+    try:
+        os.remove(SYSTEM_PROXY_BACKUP_PATH)
+    except FileNotFoundError:
+        pass
+
+
+def recover_windows_system_proxy():
+    """Restore only a proxy configuration that still points to GibVPN itself."""
+    import json
+    if not os.path.exists(SYSTEM_PROXY_BACKUP_PATH):
+        return False
+    try:
+        with open(SYSTEM_PROXY_BACKUP_PATH, "r", encoding="utf-8") as handle:
+            snapshot = json.load(handle)
+        current = read_windows_system_proxy()
+        is_ours = (current.get("ProxyEnable", {}).get("value") == 1 and
+                   current.get("ProxyServer", {}).get("value") == "127.0.0.1:10809")
+        if is_ours:
+            restore_windows_system_proxy(snapshot)
+        clear_windows_system_proxy_backup()
+        return is_ours
+    except (OSError, ValueError):
+        return False
+
 # Migrate settings/cache from a previous one-file install located in the parent
 # directory (e.g. dist/GibVPN_Smart_v3.exe + dist/app_settings.json) to the
 # new one-dir install (e.g. dist/GibVPN_Smart_v3/GibVPN_Smart_v3.exe).
@@ -604,7 +696,7 @@ def emergency_fix_internet():
     return True, log_lines
 
 
-CURRENT_APP_VERSION = "3.0.1"
+CURRENT_APP_VERSION = "3.0.2"
 
 
 def get_latest_github_app_info(repo=None):
