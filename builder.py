@@ -4,6 +4,9 @@ import sys
 import urllib.parse
 import re
 import base64
+import copy
+import ipaddress
+import socket
 
 from appcore import WORK_DIR
 
@@ -18,6 +21,19 @@ GPT_DOMAINS = [
     "domain:openai.com",
     "domain:oaistatic.com",
     "domain:oaiusercontent.com",
+    "domain:oaistatsig.com",
+    "domain:ct.sendgrid.net",
+    "domain:intercom.io",
+    "domain:intercomcdn.com",
+    "domain:openaimerge.com",
+    "domain:workos.com",
+    "domain:workoscdn.com",
+    "full:workos.imgix.net",
+    "full:challenges.cloudflare.com",
+    "full:js.stripe.com",
+    "domain:ingest.sentry.io",
+    "domain:browser-intake-datadoghq.com",
+    "full:humb.apple.com",
 ]
 
 
@@ -70,11 +86,9 @@ def _common_stream_settings(q, network="tcp"):
     sni = q.get("sni", "")
     fp = q.get("fp", "")
     
-    effective_network = network
-    if security == "reality" and network not in ("tcp", "h2", "grpc", "domainsocket"):
-        effective_network = "tcp"
-    elif effective_network == "xhttp":
-        effective_network = "splithttp"
+    # Current Xray supports XHTTP (including XHTTP + REALITY) natively.
+    # `splithttp` is the former share-link name for the same transport.
+    effective_network = "xhttp" if network == "splithttp" else network
 
     stream = {
         "network": effective_network,
@@ -115,11 +129,11 @@ def _common_stream_settings(q, network="tcp"):
         else:
             stream["tlsSettings"] = tls
 
-    if effective_network in ("xhttp", "splithttp"):
-        stream["splithttpSettings"] = {
+    if effective_network == "xhttp":
+        stream["xhttpSettings"] = {
             "path": q.get("path", "/"),
             "mode": q.get("mode", "auto"),
-            "headers": {"Host": q.get("host", "")} if q.get("host") else {},
+            "host": q.get("host", ""),
         }
     elif network == "ws":
         stream["wsSettings"] = {
@@ -691,10 +705,19 @@ def get_warp_settings(profile_path=None):
                 continue
             key, separator, value = line.partition("=")
             if separator and section in values:
-                values[section][key.strip().lower()] = value.strip()
+                normalized_key = key.strip().lower()
+                # WireGuard profiles may contain Address more than once (IPv4
+                # and IPv6). Retain every value instead of overwriting IPv4.
+                if normalized_key == "address":
+                    values[section].setdefault(normalized_key, []).append(value.strip())
+                else:
+                    values[section][normalized_key] = value.strip()
         interface = values["interface"]
         peer = values["peer"]
-        addresses = [item.strip() for item in interface.get("address", "").split(",") if item.strip()]
+        raw_addresses = interface.get("address", [])
+        if isinstance(raw_addresses, str):
+            raw_addresses = [raw_addresses]
+        addresses = [item.strip() for raw in raw_addresses for item in raw.split(",") if item.strip()]
         if not interface.get("privatekey") or not addresses or not peer.get("publickey") or not peer.get("endpoint"):
             return None
         return {
@@ -707,7 +730,55 @@ def get_warp_settings(profile_path=None):
         return None
 
 
-def generate_final_config(best_server, use_zapret=False, block_quic=True):
+def _resolved_ip(host):
+    """Resolve a tunnel endpoint before Windows routes are changed."""
+    value = str(host or "").strip().strip("[]")
+    try:
+        ipaddress.ip_address(value)
+        return value
+    except ValueError:
+        pass
+    try:
+        answers = socket.getaddrinfo(
+            value, None, family=socket.AF_INET, type=socket.SOCK_STREAM
+        )
+        return answers[0][4][0] if answers else value
+    except OSError:
+        return value
+
+
+def _pin_server_endpoint(server):
+    pinned = copy.deepcopy(server)
+    settings = pinned.get("settings", {})
+    targets = settings.get("vnext") or settings.get("servers") or []
+    if targets and targets[0].get("address"):
+        targets[0]["address"] = _resolved_ip(targets[0]["address"])
+    return pinned
+
+
+def _pin_wireguard_endpoint(warp_settings):
+    pinned = copy.deepcopy(warp_settings)
+    for peer in pinned.get("peers", []):
+        endpoint = str(peer.get("endpoint", "")).strip()
+        if endpoint.startswith("[") and "]:" in endpoint:
+            host, port = endpoint[1:].split("]:", 1)
+        elif ":" in endpoint:
+            host, port = endpoint.rsplit(":", 1)
+        else:
+            continue
+        resolved = _resolved_ip(host)
+        try:
+            is_v6 = ipaddress.ip_address(resolved).version == 6
+        except ValueError:
+            is_v6 = False
+        peer["endpoint"] = f"[{resolved}]:{port}" if is_v6 else f"{resolved}:{port}"
+    return pinned
+
+
+def generate_final_config(
+    best_server, use_zapret=False, block_quic=True,
+    resolve_endpoints=False,
+):
     direct_domains = ["domain:ru", "domain:рф", "domain:xn--p1ai"]
     if use_zapret:
         # Route YouTube, Discord, Instagram, Twitter, Torrent trackers, AI & Cloud tools
@@ -792,9 +863,14 @@ def generate_final_config(best_server, use_zapret=False, block_quic=True):
 
     # Work on a copy so the caller's server dict (kept in memory and saved to
     # settings as manual_server) is not polluted with the rewritten tag.
-    best_server = dict(best_server)
+    best_server = (
+        _pin_server_endpoint(best_server)
+        if resolve_endpoints else copy.deepcopy(best_server)
+    )
     best_server["tag"] = "best-proxy"
     warp_settings = get_warp_settings()
+    if warp_settings and resolve_endpoints:
+        warp_settings = _pin_wireguard_endpoint(warp_settings)
 
     outbounds = [
         best_server,
@@ -921,7 +997,11 @@ def generate_tun_config():
         "inbounds": [{
             "type": "tun",
             "tag": "tun-in",
-            "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+            "interface_name": "gibvpn-tun",
+            # Windows may deny per-interface IPv6 DNS configuration even to an
+            # elevated process. IPv4 TUN is sufficient for desktop apps and
+            # avoids aborting the entire VPN on those systems.
+            "address": ["172.19.0.1/30"],
             "mtu": 1400,
             "auto_route": True,
             "strict_route": True,
@@ -933,7 +1013,27 @@ def generate_tun_config():
         ],
         "route": {
             "auto_detect_interface": True,
-            "rules": [{"action": "hijack-dns", "protocol": "dns"}],
+            "rules": [
+                {
+                    # Windows sends adapter DNS to the TUN peer address. Port
+                    # matching is reliable even when protocol sniffing has not
+                    # classified the first UDP packet yet.
+                    "port": 53,
+                    "action": "hijack-dns",
+                },
+                {
+                    # Without this rule Xray's connection to the remote VPN
+                    # server is captured by the TUN and sent back to Xray,
+                    # creating a loop that cuts off all Internet access.
+                    "process_name": [
+                        "xray.exe",
+                        "sing-box.exe",
+                    ],
+                    "action": "route",
+                    "outbound": "direct",
+                },
+                {"action": "hijack-dns", "protocol": "dns"},
+            ],
             "final": "xray-out",
         },
     }

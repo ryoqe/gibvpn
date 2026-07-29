@@ -760,6 +760,7 @@ class GibVPNApp(QMainWindow):
             cwd=WORK_DIR,
             startupinfo=startupinfo
         )
+        appcore.attach_process_to_app_job(proc)
         if is_test:
             self._xray_processes.add(proc)
         return proc
@@ -776,11 +777,62 @@ class GibVPNApp(QMainWindow):
             stderr=subprocess.PIPE,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-        time.sleep(0.6)
+        appcore.attach_process_to_app_job(proc)
+        # Windows needs a moment to apply the new interface DNS and route
+        # metrics. Testing too early produces a false "no Internet" failure.
+        time.sleep(1.5)
         if proc.poll() is not None:
             error = (proc.stderr.read() or b"").decode("utf-8", errors="replace").strip()
             raise RuntimeError(error or "sing-box не смог создать TUN-адаптер")
+        healthy, details = appcore.verify_tun_connectivity()
+        if not healthy:
+            try:
+                proc.terminate()
+                proc.wait(timeout=3)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            raise RuntimeError(
+                "TUN создан, но проверка Интернета не прошла. "
+                f"Маршруты автоматически отменены: {details}"
+            )
         return proc
+
+    def _watch_tun_process(self, proc):
+        """Fail closed if the TUN engine exits after a successful launch."""
+        last_lines = []
+        try:
+            if proc.stderr:
+                for raw_line in iter(proc.stderr.readline, b""):
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if line:
+                        last_lines.append(line)
+                        last_lines = last_lines[-5:]
+            return_code = proc.wait()
+        except Exception:
+            return_code = proc.poll()
+
+        if not self.is_running or self.tun_process is not proc:
+            return
+
+        self.tun_process = None
+        self.is_running = False
+        self._reap_xray(self.xray_process)
+        self.xray_process = None
+        if self.zapret_process:
+            stop_zapret_process(self.zapret_process)
+            self.zapret_process = None
+        details = last_lines[-1] if last_lines else f"код завершения {return_code}"
+        self.log(f"[TUN] Аварийная остановка: {details}")
+        self.set_status("VPN ОСТАНОВЛЕН: ОШИБКА TUN", "red")
+        self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
+        self.show_dialog_signal.emit(
+            "warning", "Полный VPN остановлен",
+            "Сетевой движок завершился. Маршруты Windows уже сняты, "
+            f"Xray остановлен безопасно.\n\n{details}"
+        )
 
     def _reap_xray(self, proc):
         if proc is not None:
@@ -1339,8 +1391,28 @@ class GibVPNApp(QMainWindow):
                 "Перезапустите GibVPN от имени администратора и подключитесь снова."
             )
             return
+        if self.use_tun:
+            conflicting_adapters = appcore.find_conflicting_vpn_adapters()
+            if conflicting_adapters:
+                names = ", ".join(conflicting_adapters)
+                self.is_running = False
+                self.set_status("ОСТАНОВИТЕ ДРУГОЙ VPN", "red")
+                self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
+                self.log(f"[TUN] Конфликт с другим активным VPN: {names}")
+                self.show_dialog_signal.emit(
+                    "warning", "Одновременно включены два VPN",
+                    "Полный VPN не запущен, поэтому маршруты Windows не изменялись.\n\n"
+                    f"Сейчас активен другой VPN-адаптер: {names}.\n"
+                    "Отключите другое VPN-приложение и нажмите «Старт» снова."
+                )
+                return
         use_zap = getattr(self, "use_zapret", False)
-        builder.generate_final_config(best_server, use_zapret=use_zap, block_quic=getattr(self, "block_quic", True))
+        builder.generate_final_config(
+            best_server,
+            use_zapret=use_zap,
+            block_quic=getattr(self, "block_quic", True),
+            resolve_endpoints=self.use_tun,
+        )
 
         vpn_host = builder.server_address(best_server)
         if use_zap and getattr(self, "zapret_dir", None):
@@ -1358,6 +1430,10 @@ class GibVPNApp(QMainWindow):
             time.sleep(0.2)
 
         self.xray_process = self._spawn_xray()
+        if not appcore.wait_for_local_port(10808):
+            self._reap_xray(self.xray_process)
+            self.xray_process = None
+            raise RuntimeError("Xray запустился, но локальный VPN-порт 10808 не открылся")
         if self.use_tun:
             try:
                 self.tun_process = self._spawn_tun()
@@ -1374,6 +1450,12 @@ class GibVPNApp(QMainWindow):
             except OSError as exc:
                 self.log(f"[SYSTEM] Не удалось включить прокси Windows: {exc}")
         self.is_running = True
+        if self.tun_process:
+            threading.Thread(
+                target=self._watch_tun_process,
+                args=(self.tun_process,),
+                daemon=True,
+            ).start()
         self.log(f"[CORE] Final xray PID: {self.xray_process.pid}")
         self.log(f"[CORE] SOCKS inbound: 127.0.0.1:10808")
         self.log(f"[CORE] HTTP inbound: 127.0.0.1:10809")

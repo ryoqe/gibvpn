@@ -9,9 +9,6 @@ __pycache__/
 # PyInstaller & Build automation (local dev only)
 build/
 dist/
-*.spec
-build.py
-build.bat
 screenshot_tool.py
 *.zip
 

@@ -257,10 +257,10 @@ class UpdateDialog(QDialog):
 
     def _check_updates(self):
         def worker():
-            tag, url, notes = appcore.get_latest_github_app_info()
+            tag, url, notes, sha256 = appcore.get_latest_github_app_info()
             cur_ver = appcore.CURRENT_APP_VERSION
             if tag and tag != cur_ver:
-                self._update_data = (tag, url, notes)
+                self._update_data = (tag, url, notes, sha256)
                 self.lbl_status.setText(f"Доступно обновление: v{tag} (у вас v{cur_ver})")
                 self.notes_edit.setPlainText(notes or "Список изменений недоступен.")
                 self.btn_update.setEnabled(True)
@@ -278,7 +278,7 @@ class UpdateDialog(QDialog):
             QMessageBox.warning(self, "Ошибка", "URL для скачивания не найден.")
             return
 
-        tag, download_url, _ = self._update_data
+        tag, download_url, _, expected_sha256 = self._update_data
         self.btn_update.setEnabled(False)
         self.lbl_status.setText(f"Загрузка версии v{tag} (через VPN при необходимости)...")
 
@@ -314,7 +314,9 @@ class UpdateDialog(QDialog):
                 return
 
             filename = os.path.basename(download_url) or f"gibvpn_v{tag}.exe"
-            ok, msg = appcore.apply_downloaded_app_update(res.content, filename)
+            ok, msg = appcore.apply_downloaded_app_update(
+                res.content, filename, expected_sha256
+            )
             if ok:
                 self.parent_app.log(msg)
                 QMessageBox.information(self, "Обновление", msg)

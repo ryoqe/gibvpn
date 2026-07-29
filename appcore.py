@@ -9,6 +9,7 @@ import sys
 import shutil
 import time
 import traceback
+import hashlib
 
 # PyInstaller sets sys.stdout/sys.stderr to None for windowed apps.
 if sys.stdout is None:
@@ -27,7 +28,7 @@ def get_app_dir():
     os.makedirs(app_data_dir, exist_ok=True)
 
     if getattr(sys, 'frozen', False):
-        base_src = os.path.dirname(sys.executable)
+        base_src = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
     else:
         base_src = os.path.dirname(os.path.abspath(__file__))
 
@@ -48,6 +49,46 @@ def get_app_dir():
     return app_data_dir
 
 
+def _copy_if_changed(src, dst):
+    """Atomically refresh an embedded helper while preserving equal files."""
+    if not os.path.isfile(src):
+        return
+    try:
+        if os.path.isfile(dst) and os.path.getsize(src) == os.path.getsize(dst):
+            def digest(path):
+                value = hashlib.sha256()
+                with open(path, "rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        value.update(chunk)
+                return value.digest()
+            if digest(src) == digest(dst):
+                return
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        temp_path = dst + ".new"
+        shutil.copy2(src, temp_path)
+        os.replace(temp_path, dst)
+    except OSError:
+        # If security software locks an old helper, keep the usable copy and
+        # retry automatically on the next launch.
+        try:
+            os.remove(dst + ".new")
+        except OSError:
+            pass
+
+
+def _sync_embedded_tree(src_root, dst_root):
+    if not os.path.isdir(src_root):
+        return
+    for root, _dirs, files in os.walk(src_root):
+        relative = os.path.relpath(root, src_root)
+        target_root = dst_root if relative == "." else os.path.join(dst_root, relative)
+        for filename in files:
+            _copy_if_changed(
+                os.path.join(root, filename),
+                os.path.join(target_root, filename),
+            )
+
+
 def get_work_dir(app_dir):
     """
     Directory that contains xray.exe and helper data files.
@@ -57,31 +98,31 @@ def get_work_dir(app_dir):
     app_dir once so they (and the settings/config written alongside them)
     persist across restarts.
     """
-    if os.path.exists(os.path.join(app_dir, "xray.exe")):
-        return app_dir
-
     meipass = getattr(sys, '_MEIPASS', None)
     if meipass and os.path.exists(os.path.join(meipass, "xray.exe")):
-        helpers = [
+        immutable_helpers = [
             'xray.exe', 'geoip.dat', 'geosite.dat',
-            'direct_domains.txt', 'warp_domains.txt',
-            'wgcf-account.toml', 'wgcf-profile.conf',
-            'decoded_sub.txt', 'ofont.ru_Zeequada.ttf',
+            'ofont.ru_Zeequada.ttf',
         ]
-        # Also migrate any per-subscription cached files that were bundled.
-        for name in os.listdir(meipass):
-            if name.startswith('decoded_sub_') and name.endswith('.txt'):
-                helpers.append(name)
-
-        for name in helpers:
+        for name in immutable_helpers:
             src = os.path.join(meipass, name)
             dst = os.path.join(app_dir, name)
-            if not os.path.exists(src) or os.path.exists(dst):
-                continue
-            try:
-                shutil.copy2(src, dst)
-            except Exception:
-                pass
+            _copy_if_changed(src, dst)
+
+        # User-editable rules are initial defaults, never overwrite them.
+        for name in ('direct_domains.txt', 'direct_apps.txt', 'warp_domains.txt'):
+            src = os.path.join(meipass, name)
+            dst = os.path.join(app_dir, name)
+            if os.path.isfile(src) and not os.path.exists(dst):
+                _copy_if_changed(src, dst)
+
+        # Refresh bundled engines/assets recursively. Private WARP profiles and
+        # subscription caches are deliberately never embedded or overwritten.
+        for dirname in ('singbox_bin', 'zapret_bin', 'assets'):
+            _sync_embedded_tree(
+                os.path.join(meipass, dirname),
+                os.path.join(app_dir, dirname),
+            )
 
         if os.path.exists(os.path.join(app_dir, "xray.exe")):
             return app_dir
@@ -89,6 +130,9 @@ def get_work_dir(app_dir):
         # If copying failed for some reason, fall back to the temp dir so the
         # app can at least start.
         return meipass
+
+    if os.path.exists(os.path.join(app_dir, "xray.exe")):
+        return app_dir
 
     return app_dir
 
@@ -110,6 +154,183 @@ def is_windows_admin():
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:
         return False
+
+
+def find_conflicting_vpn_adapters():
+    """Return active third-party VPN adapters that currently own full routes.
+
+    Two full-tunnel clients cannot safely manage the same Windows default
+    routes.  Detect that situation before sing-box changes anything so a failed
+    launch cannot take the whole machine offline.
+    """
+    if os.name != "nt":
+        return []
+
+    import json
+    import subprocess
+
+    script = r"""
+$fullPrefixes = @('0.0.0.0/0','0.0.0.0/1','128.0.0.0/1','::/0','::/1','8000::/1')
+$routeIndexes = @(Get-NetRoute -ErrorAction SilentlyContinue |
+    Where-Object { $fullPrefixes -contains $_.DestinationPrefix } |
+    Select-Object -ExpandProperty InterfaceIndex -Unique)
+@(Get-NetAdapter -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.Status -eq 'Up' -and
+        $routeIndexes -contains $_.InterfaceIndex -and
+        $_.Name -ne 'gibvpn-tun' -and
+        (($_.Name + ' ' + $_.InterfaceDescription) -match '(?i)(tun|tap|wintun|wireguard|warp|happ|tailscale|openvpn)')
+    } |
+    Select-Object Name, InterfaceDescription) | ConvertTo-Json -Compress
+"""
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-NonInteractive",
+                "-ExecutionPolicy", "Bypass", "-Command", script,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return []
+        data = json.loads(result.stdout)
+        if isinstance(data, dict):
+            data = [data]
+        names = []
+        for item in data:
+            name = str(item.get("Name", "")).strip()
+            if name and name not in names:
+                names.append(name)
+        return names
+    except (OSError, ValueError, subprocess.SubprocessError):
+        # Detection is a safety aid. A locked-down PowerShell policy must not
+        # make the ordinary proxy mode unusable.
+        return []
+
+
+def wait_for_local_port(port, host="127.0.0.1", timeout=5.0):
+    """Wait until a local helper has actually opened its listening socket."""
+    import socket
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.25):
+                return True
+        except OSError:
+            time.sleep(0.1)
+    return False
+
+
+def verify_tun_connectivity(timeout=8):
+    """Probe the new system route from a child process captured by the TUN."""
+    import subprocess
+
+    curl = shutil.which("curl.exe") or shutil.which("curl")
+    if not curl:
+        return True, "curl недоступен, проверка пропущена"
+
+    targets = (
+        "https://cp.cloudflare.com/generate_204",
+        "https://www.google.com/generate_204",
+    )
+    errors = []
+    for url in targets:
+        try:
+            result = subprocess.run(
+                [
+                    curl, "--noproxy", "*", "--silent", "--show-error",
+                    "--output", os.devnull, "--write-out", "%{http_code}",
+                    "--connect-timeout", "7", "--max-time", str(timeout), url,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout + 2,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            code = result.stdout.strip()
+            if result.returncode == 0 and code in {"200", "204"}:
+                return True, f"{url}: HTTP {code}"
+            errors.append((result.stderr or f"HTTP {code}").strip())
+        except (OSError, subprocess.SubprocessError) as exc:
+            errors.append(str(exc))
+    return False, "; ".join(error for error in errors if error) or "нет ответа"
+
+
+_KILL_JOB_HANDLE = None
+
+
+def attach_process_to_app_job(proc):
+    """Ensure a helper is killed by Windows if GibVPN crashes or is updated."""
+    if os.name != "nt" or proc is None or not hasattr(proc, "_handle"):
+        return True
+
+    import ctypes
+    from ctypes import wintypes
+
+    class IO_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_ulonglong),
+            ("WriteOperationCount", ctypes.c_ulonglong),
+            ("OtherOperationCount", ctypes.c_ulonglong),
+            ("ReadTransferCount", ctypes.c_ulonglong),
+            ("WriteTransferCount", ctypes.c_ulonglong),
+            ("OtherTransferCount", ctypes.c_ulonglong),
+        ]
+
+    class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+            ("IoInfo", IO_COUNTERS),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    global _KILL_JOB_HANDLE
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+    ]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+
+    if not _KILL_JOB_HANDLE:
+        handle = kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            return False
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = 0x00002000  # KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(
+            handle, 9, ctypes.byref(info), ctypes.sizeof(info)
+        ):
+            kernel32.CloseHandle(handle)
+            return False
+        _KILL_JOB_HANDLE = handle
+
+    return bool(kernel32.AssignProcessToJobObject(
+        _KILL_JOB_HANDLE, wintypes.HANDLE(int(proc._handle))
+    ))
 
 
 APP_DIR = get_app_dir()
@@ -383,6 +604,7 @@ def start_zapret_process(zapret_dir, preset_bat="Встроенный Униве
             cwd=cwd,
             creationflags=creationflags
         )
+        attach_process_to_app_job(proc)
         return proc
     except OSError as e:
         if getattr(e, 'winerror', None) == 740 or '740' in str(e):
@@ -404,18 +626,20 @@ def start_zapret_process(zapret_dir, preset_bat="Встроенный Униве
 
 
 def stop_zapret_process(proc=None):
-    """Stop Zapret process quickly and clean up winws.exe child tasks."""
-    if proc is not None:
-        try:
-            proc.kill()
-            proc.wait(timeout=0.5)
-        except Exception:
-            pass
+    """Stop only the Zapret process tree started by this application."""
+    if proc is None or isinstance(proc, str):
+        return
     try:
         import subprocess
-        subprocess.run(["taskkill", "/F", "/IM", "winws.exe"], capture_output=True, timeout=1)
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            capture_output=True,
+            timeout=2,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        proc.wait(timeout=0.5)
     except Exception:
-        pass
+        terminate_process(proc, timeout=0.5)
 
 
 def test_zapret_strategy(zapret_dir, preset_name, timeout=1.5):
@@ -658,26 +882,18 @@ def download_zapret_github_update(zapret_dir, target_version=None):
 def emergency_fix_internet():
     """
     Emergency Network Recovery:
-    1. Kills all orphaned xray, winws, v2ray processes.
-    2. Stops Zapret and WinDivert services/drivers.
-    3. Clears Windows System Proxy in Registry.
-    4. Resets WINHTTP system proxy.
-    5. Flushes Windows DNS Resolver cache.
+    1. Stops only GibVPN-managed services/drivers.
+    2. Clears Windows System Proxy in Registry.
+    3. Resets WINHTTP system proxy.
+    4. Flushes Windows DNS Resolver cache.
     Returns (success: bool, log_lines: list[str]).
     """
     import subprocess, winreg
     log_lines = []
 
-    # 1. Kill orphaned winws processes (Zapret)
-    for proc_name in ["winws.exe"]:
-        try:
-            res = subprocess.run(["taskkill", "/F", "/IM", proc_name], capture_output=True, text=True, timeout=2)
-            if res.returncode == 0:
-                log_lines.append(f"Остановлен процесс: {proc_name}")
-        except Exception:
-            pass
-
-    # 2. Stop Zapret and WinDivert services/drivers
+    # Do not kill every winws.exe on the computer: it may belong to another
+    # application. New GibVPN helpers are tied to the app's Windows Job Object.
+    # Stop only the service names explicitly managed by GibVPN/Zapret.
     for svc in ["zapret", "winws", "WinDivert", "WinDivert1.4"]:
         try:
             subprocess.run(["sc", "stop", svc], capture_output=True, text=True, timeout=2)
@@ -685,7 +901,7 @@ def emergency_fix_internet():
         except Exception:
             pass
 
-    # 3. Clear System Proxy in Registry
+    # Clear System Proxy in Registry
     try:
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_ALL_ACCESS) as key:
@@ -702,14 +918,14 @@ def emergency_fix_internet():
     except Exception as e:
         log_lines.append(f"Ошибка сброса прокси: {e}")
 
-    # 4. Reset WINHTTP proxy
+    # Reset WINHTTP proxy
     try:
         subprocess.run(["netsh", "winhttp", "reset", "proxy"], capture_output=True, text=True, timeout=2)
         log_lines.append("Сброшен WINHTTP прокси (netsh winhttp reset proxy)")
     except Exception:
         pass
 
-    # 5. Flush DNS Cache
+    # Flush DNS Cache
     try:
         res = subprocess.run(["ipconfig", "/flushdns"], capture_output=True, text=True, timeout=3)
         if res.returncode == 0:
@@ -720,14 +936,14 @@ def emergency_fix_internet():
     return True, log_lines
 
 
-CURRENT_APP_VERSION = "3.0.5"
+CURRENT_APP_VERSION = "3.0.6"
 
 
 def get_latest_github_app_info(repo=None):
     """
     Check GitHub Releases for GibVPN updates.
     Tries Direct connection -> local HTTP proxy -> local SOCKS proxy.
-    Returns (latest_version_str, download_url, release_notes_str).
+    Returns (latest_version_str, download_url, release_notes_str, sha256_str).
     """
     import requests
     target_repo = repo or os.environ.get("GIBVPN_REPO", "ryoqe/gibvpn")
@@ -744,6 +960,7 @@ def get_latest_github_app_info(repo=None):
 
     tag_name = None
     download_url = None
+    download_sha256 = None
     notes = ""
 
     for proxies in proxy_options:
@@ -762,6 +979,9 @@ def get_latest_github_app_info(repo=None):
                     name = asset.get("name", "").lower()
                     if name.endswith(".exe"):
                         download_url = asset.get("browser_download_url")
+                        digest = str(asset.get("digest") or "")
+                        if digest.lower().startswith("sha256:"):
+                            download_sha256 = digest.split(":", 1)[1].lower()
                         break
                 if tag_name:
                     break
@@ -769,16 +989,21 @@ def get_latest_github_app_info(repo=None):
             continue
 
     os.environ.update(env_proxies)
-    return tag_name, download_url, notes
+    return tag_name, download_url, notes, download_sha256
 
 
-def apply_downloaded_app_update(file_bytes, filename):
+def apply_downloaded_app_update(file_bytes, filename, expected_sha256=None):
     """
     Save update payload and launch update script to overwrite current binary on exit.
     """
     import tempfile, subprocess
     if not filename.lower().endswith(".exe") or file_bytes[:2] != b"MZ":
-        return False, "Обновление должно быть подписанным исполняемым файлом .exe"
+        return False, "Обновление должно быть исполняемым файлом .exe"
+    if not expected_sha256:
+        return False, "GitHub не предоставил SHA-256 обновления; установка отменена"
+    actual_sha256 = hashlib.sha256(file_bytes).hexdigest()
+    if actual_sha256.lower() != expected_sha256.lower():
+        return False, "SHA-256 обновления не совпадает; файл удалён"
     temp_dir = tempfile.mkdtemp(prefix="gibvpn_update_")
     dest_path = os.path.join(temp_dir, filename)
     with open(dest_path, "wb") as f:
@@ -788,9 +1013,17 @@ def apply_downloaded_app_update(file_bytes, filename):
     if getattr(sys, 'frozen', False):
         bat_path = os.path.join(temp_dir, "update.bat")
         script = f"""@echo off
-timeout /t 2 /nobreak > nul
-copy /y "{dest_path}" "{cur_exe}"
+set tries=0
+:retry
+timeout /t 1 /nobreak > nul
+copy /y "{dest_path}" "{cur_exe}" > nul
+if not errorlevel 1 goto copied
+set /a tries+=1
+if %tries% lss 20 goto retry
+exit /b 1
+:copied
 start "" "{cur_exe}"
+del "{dest_path}" > nul 2>&1
 del "%~f0"
 """
         with open(bat_path, "w", encoding="utf-8") as f:

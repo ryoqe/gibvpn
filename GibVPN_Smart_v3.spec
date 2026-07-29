@@ -57,8 +57,10 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.datas,
     [],
-    exclude_binaries=True,
+    exclude_binaries=False,
     name='GibVPN_Smart_v3',
     debug=False,
     bootloader_ignore_signals=False,
@@ -73,15 +75,4 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     version=os.path.join(work_dir, 'version.txt'),
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name='GibVPN_Smart_v3',
 )
