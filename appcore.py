@@ -637,7 +637,12 @@ def download_zapret_github_update(zapret_dir, target_version=None):
             if not rel_path:
                 continue
 
-            dest_path = os.path.join(target_dir, rel_path)
+            # Archives are external input.  Refuse traversal such as ../../x
+            # even when a release mirror is compromised.
+            dest_path = os.path.abspath(os.path.join(target_dir, rel_path))
+            target_root = os.path.abspath(target_dir) + os.sep
+            if not dest_path.startswith(target_root):
+                raise ValueError(f"Недопустимый путь в архиве: {filename}")
             if member.is_dir():
                 os.makedirs(dest_path, exist_ok=True)
             else:
@@ -715,7 +720,7 @@ def emergency_fix_internet():
     return True, log_lines
 
 
-CURRENT_APP_VERSION = "3.0.4"
+CURRENT_APP_VERSION = "3.0.5"
 
 
 def get_latest_github_app_info(repo=None):
@@ -750,9 +755,12 @@ def get_latest_github_app_info(repo=None):
                 data = r.json()
                 tag_name = data.get("tag_name", "").lstrip("v")
                 notes = data.get("body", "")
-                for asset in data.get("assets", []):
+                assets = data.get("assets", [])
+                # The in-app updater replaces an executable. ZIP files remain
+                # useful for manual downloads but must never be selected here.
+                for asset in assets:
                     name = asset.get("name", "").lower()
-                    if name.endswith(".exe") or name.endswith(".zip"):
+                    if name.endswith(".exe"):
                         download_url = asset.get("browser_download_url")
                         break
                 if tag_name:
@@ -769,6 +777,8 @@ def apply_downloaded_app_update(file_bytes, filename):
     Save update payload and launch update script to overwrite current binary on exit.
     """
     import tempfile, subprocess
+    if not filename.lower().endswith(".exe") or file_bytes[:2] != b"MZ":
+        return False, "Обновление должно быть подписанным исполняемым файлом .exe"
     temp_dir = tempfile.mkdtemp(prefix="gibvpn_update_")
     dest_path = os.path.join(temp_dir, filename)
     with open(dest_path, "wb") as f:

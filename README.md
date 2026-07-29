@@ -20,7 +20,7 @@
 👉 **[СКАЧАТЬ ПОСЛЕДНЮЮ РЕЛИЗНУЮ ВЕРСИЮ (GitHub Releases)](https://github.com/ryoqe/gibvpn/releases/latest)**
 
 Или прямая ссылка на архив релиза:
-- 📦 [GibVPN_Smart_v3.0.4_Windows_x64.zip](https://github.com/ryoqe/gibvpn/releases/download/v3.0.4/GibVPN_Smart_v3.0.4_Windows_x64.zip)
+- ⚡ [GibVPN_Smart_v3.exe](https://github.com/ryoqe/gibvpn/releases/download/v3.0.5/GibVPN_Smart_v3.exe)
 
 ### 📂 Инструкция по запуску:
 1. Скачайте архив **`GibVPN_Smart_v3.0.0_Windows_x64.zip`**.
