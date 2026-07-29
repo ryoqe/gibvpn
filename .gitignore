@@ -6,10 +6,18 @@ __pycache__/
 # C extensions
 *.so
 
-# PyInstaller / Build outputs
+# PyInstaller & Build automation (local dev only)
 build/
 dist/
 *.spec
+build.py
+build.bat
+screenshot_tool.py
+*.zip
+
+# Internal dev tests & scratch files
+tests/
+scratch/
 
 # Bundled binaries & large assets (downloaded on build/first run)
 xray.exe
