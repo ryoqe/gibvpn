@@ -257,10 +257,10 @@ class UpdateDialog(QDialog):
 
     def _check_updates(self):
         def worker():
-            tag, url, notes, sha256 = appcore.get_latest_github_app_info()
+            tag, url, notes, sha256, size = appcore.get_latest_github_app_info()
             cur_ver = appcore.CURRENT_APP_VERSION
-            if tag and tag != cur_ver:
-                self._update_data = (tag, url, notes, sha256)
+            if tag and appcore.is_newer_version(tag, cur_ver):
+                self._update_data = (tag, url, notes, sha256, size)
                 self.lbl_status.setText(f"Доступно обновление: v{tag} (у вас v{cur_ver})")
                 self.notes_edit.setPlainText(notes or "Список изменений недоступен.")
                 self.btn_update.setEnabled(True)
@@ -278,45 +278,32 @@ class UpdateDialog(QDialog):
             QMessageBox.warning(self, "Ошибка", "URL для скачивания не найден.")
             return
 
-        tag, download_url, _, expected_sha256 = self._update_data
+        tag, download_url, _, expected_sha256, expected_size = self._update_data
         self.btn_update.setEnabled(False)
         self.lbl_status.setText(f"Загрузка версии v{tag} (через VPN при необходимости)...")
 
         def worker():
-            import requests
-            headers = {"User-Agent": "GibVPN-Updater/3.0"}
-            
-            proxy_options = [
-                None,
-                {"http": "http://127.0.0.1:10809", "https": "http://127.0.0.1:10809"},
-                {"http": "socks5://127.0.0.1:10808", "https": "socks5://127.0.0.1:10808"}
-            ]
-
-            env_proxies = {k: os.environ.pop(k) for k in list(os.environ.keys()) if "proxy" in k.lower()}
-            res = None
-
-            for proxies in proxy_options:
-                try:
-                    s = requests.Session()
-                    s.trust_env = False
-                    r = s.get(download_url, headers=headers, proxies=proxies, timeout=20)
-                    if r.status_code == 200 and len(r.content) > 1000:
-                        res = r
-                        break
-                except Exception:
-                    continue
-
-            os.environ.update(env_proxies)
-
-            if not res or res.status_code != 200:
-                self.parent_app.log("Ошибка скачивания обновления с GitHub.")
-                QMessageBox.critical(self, "Ошибка", "Не удалось загрузить обновление.")
+            ok, path_or_error = appcore.download_github_app_asset(
+                download_url, expected_size
+            )
+            if not ok:
+                self.parent_app.log(
+                    f"Ошибка скачивания обновления: {path_or_error}"
+                )
+                QMessageBox.critical(
+                    self, "Ошибка",
+                    f"Не удалось загрузить обновление.\n\n{path_or_error}"
+                )
                 return
 
-            filename = os.path.basename(download_url) or f"gibvpn_v{tag}.exe"
-            ok, msg = appcore.apply_downloaded_app_update(
-                res.content, filename, expected_sha256
+            filename = "GibVPN_Smart_v3.exe"
+            ok, msg = appcore.apply_downloaded_app_update_path(
+                path_or_error, filename, expected_sha256
             )
+            try:
+                os.remove(path_or_error)
+            except OSError:
+                pass
             if ok:
                 self.parent_app.log(msg)
                 QMessageBox.information(self, "Обновление", msg)

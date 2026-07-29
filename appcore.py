@@ -936,14 +936,27 @@ def emergency_fix_internet():
     return True, log_lines
 
 
-CURRENT_APP_VERSION = "3.0.6"
+CURRENT_APP_VERSION = "3.0.7"
+
+
+def is_newer_version(candidate, current):
+    """Compare dotted numeric versions without treating older tags as updates."""
+    def parts(value):
+        numbers = []
+        for item in str(value or "").lstrip("vV").split("."):
+            try:
+                numbers.append(int(item))
+            except ValueError:
+                numbers.append(0)
+        return tuple((numbers + [0, 0, 0, 0])[:4])
+    return parts(candidate) > parts(current)
 
 
 def get_latest_github_app_info(repo=None):
     """
     Check GitHub Releases for GibVPN updates.
     Tries Direct connection -> local HTTP proxy -> local SOCKS proxy.
-    Returns (latest_version_str, download_url, release_notes_str, sha256_str).
+    Returns (version, asset_api_url, notes, sha256, byte_size).
     """
     import requests
     target_repo = repo or os.environ.get("GIBVPN_REPO", "ryoqe/gibvpn")
@@ -961,6 +974,7 @@ def get_latest_github_app_info(repo=None):
     tag_name = None
     download_url = None
     download_sha256 = None
+    download_size = None
     notes = ""
 
     for proxies in proxy_options:
@@ -978,10 +992,21 @@ def get_latest_github_app_info(repo=None):
                 for asset in assets:
                     name = asset.get("name", "").lower()
                     if name.endswith(".exe"):
-                        download_url = asset.get("browser_download_url")
+                        # The asset API is reachable anywhere release metadata
+                        # is reachable and redirects to the same signed blob.
+                        # It is more reliable than opening github.com/releases
+                        # separately on filtered networks.
+                        download_url = (
+                            asset.get("url")
+                            or asset.get("browser_download_url")
+                        )
                         digest = str(asset.get("digest") or "")
                         if digest.lower().startswith("sha256:"):
                             download_sha256 = digest.split(":", 1)[1].lower()
+                        try:
+                            download_size = int(asset.get("size") or 0) or None
+                        except (TypeError, ValueError):
+                            download_size = None
                         break
                 if tag_name:
                     break
@@ -989,28 +1014,104 @@ def get_latest_github_app_info(repo=None):
             continue
 
     os.environ.update(env_proxies)
-    return tag_name, download_url, notes, download_sha256
+    return tag_name, download_url, notes, download_sha256, download_size
 
 
-def apply_downloaded_app_update(file_bytes, filename, expected_sha256=None):
+def download_github_app_asset(
+    download_url, expected_size, chunk_size=8 * 1024 * 1024
+):
+    """Download a GitHub release asset in resumable ranges.
+
+    Large single responses can stall indefinitely on filtered networks. Each
+    range is independently retried through direct, HTTP-proxy and SOCKS paths.
+    Returns (success, path_or_error).
     """
-    Save update payload and launch update script to overwrite current binary on exit.
-    """
-    import tempfile, subprocess
-    if not filename.lower().endswith(".exe") or file_bytes[:2] != b"MZ":
-        return False, "Обновление должно быть исполняемым файлом .exe"
-    if not expected_sha256:
-        return False, "GitHub не предоставил SHA-256 обновления; установка отменена"
-    actual_sha256 = hashlib.sha256(file_bytes).hexdigest()
-    if actual_sha256.lower() != expected_sha256.lower():
-        return False, "SHA-256 обновления не совпадает; файл удалён"
-    temp_dir = tempfile.mkdtemp(prefix="gibvpn_update_")
-    dest_path = os.path.join(temp_dir, filename)
-    with open(dest_path, "wb") as f:
-        f.write(file_bytes)
+    import requests
+    import tempfile
 
+    if not download_url or not expected_size:
+        return False, "GitHub не сообщил URL или размер файла обновления"
+
+    fd, temp_path = tempfile.mkstemp(prefix="gibvpn_asset_", suffix=".exe")
+    os.close(fd)
+    headers_base = {
+        "User-Agent": "GibVPN-Updater/3.0",
+        "Accept": "application/octet-stream",
+    }
+    proxy_options = [
+        None,
+        {"http": "http://127.0.0.1:10809", "https": "http://127.0.0.1:10809"},
+        {"http": "socks5://127.0.0.1:10808", "https": "socks5://127.0.0.1:10808"},
+    ]
+
+    try:
+        with open(temp_path, "wb") as target:
+            start = 0
+            while start < expected_size:
+                end = min(start + chunk_size - 1, expected_size - 1)
+                received = None
+                last_error = ""
+                for proxies in proxy_options:
+                    for _attempt in range(2):
+                        try:
+                            session = requests.Session()
+                            session.trust_env = False
+                            headers = dict(headers_base)
+                            headers["Range"] = f"bytes={start}-{end}"
+                            response = session.get(
+                                download_url,
+                                headers=headers,
+                                proxies=proxies,
+                                timeout=(12, 60),
+                            )
+                            expected_chunk = end - start + 1
+                            if (
+                                response.status_code == 206
+                                and len(response.content) == expected_chunk
+                            ):
+                                received = response.content
+                                break
+                            if (
+                                start == 0
+                                and response.status_code == 200
+                                and len(response.content) == expected_size
+                            ):
+                                received = response.content
+                                end = expected_size - 1
+                                break
+                            last_error = (
+                                f"HTTP {response.status_code}, "
+                                f"получено {len(response.content)} байт"
+                            )
+                        except requests.RequestException as exc:
+                            last_error = str(exc)
+                    if received is not None:
+                        break
+                if received is None:
+                    raise OSError(
+                        f"Не удалось скачать блок {start}-{end}: {last_error}"
+                    )
+                target.write(received)
+                start = end + 1
+
+        if os.path.getsize(temp_path) != expected_size:
+            raise OSError("Размер скачанного обновления не совпадает")
+        return True, temp_path
+    except OSError as exc:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        return False, str(exc)
+
+
+def _schedule_app_update(dest_path, filename):
+    import tempfile
+
+    temp_dir = os.path.dirname(dest_path)
     cur_exe = sys.executable
     if getattr(sys, 'frozen', False):
+        import subprocess
         bat_path = os.path.join(temp_dir, "update.bat")
         script = f"""@echo off
 set tries=0
@@ -1030,5 +1131,55 @@ del "%~f0"
             f.write(script)
         subprocess.Popen(["cmd.exe", "/c", bat_path], creationflags=0x08000000)
         return True, "Обновление скачано! Перезапуск приложения..."
-    else:
-        return True, f"Файл обновления сохранён в {dest_path}"
+    return True, f"Файл обновления сохранён в {dest_path}"
+
+
+def apply_downloaded_app_update_path(file_path, filename, expected_sha256=None):
+    """Verify a downloaded EXE by SHA-256 and schedule atomic replacement."""
+    import tempfile
+
+    if not filename.lower().endswith(".exe"):
+        return False, "Обновление должно быть исполняемым файлом .exe"
+    try:
+        with open(file_path, "rb") as source:
+            if source.read(2) != b"MZ":
+                return False, "Файл обновления не является Windows EXE"
+            digest = hashlib.sha256()
+            source.seek(0)
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        return False, f"Не удалось прочитать обновление: {exc}"
+
+    if not expected_sha256:
+        return False, "GitHub не предоставил SHA-256 обновления; установка отменена"
+    if digest.hexdigest().lower() != expected_sha256.lower():
+        return False, "SHA-256 обновления не совпадает; файл удалён"
+
+    temp_dir = tempfile.mkdtemp(prefix="gibvpn_update_")
+    dest_path = os.path.join(temp_dir, filename)
+    try:
+        shutil.copy2(file_path, dest_path)
+    except OSError as exc:
+        return False, f"Не удалось подготовить обновление: {exc}"
+    return _schedule_app_update(dest_path, filename)
+
+
+def apply_downloaded_app_update(file_bytes, filename, expected_sha256=None):
+    """
+    Save update payload and launch update script to overwrite current binary on exit.
+    """
+    import tempfile
+    if not filename.lower().endswith(".exe") or file_bytes[:2] != b"MZ":
+        return False, "Обновление должно быть исполняемым файлом .exe"
+    if not expected_sha256:
+        return False, "GitHub не предоставил SHA-256 обновления; установка отменена"
+    actual_sha256 = hashlib.sha256(file_bytes).hexdigest()
+    if actual_sha256.lower() != expected_sha256.lower():
+        return False, "SHA-256 обновления не совпадает; файл удалён"
+    temp_dir = tempfile.mkdtemp(prefix="gibvpn_update_")
+    dest_path = os.path.join(temp_dir, filename)
+    with open(dest_path, "wb") as f:
+        f.write(file_bytes)
+
+    return _schedule_app_update(dest_path, filename)
