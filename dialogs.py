@@ -522,6 +522,11 @@ class SettingsDialog(QDialog):
         self.chk_tun.stateChanged.connect(self.apply_tun)
         form_misc.addRow(self.chk_tun)
 
+        self.btn_import_warp = QPushButton("Импортировать личный WARP-профиль")
+        self.btn_import_warp.setToolTip("Выберите wgcf-profile.conf. Ключ останется только на этом компьютере.")
+        self.btn_import_warp.clicked.connect(self.import_warp_profile)
+        form_misc.addRow(self.btn_import_warp)
+
         self.spin_sub_hours = QSpinBox()
         self.spin_sub_hours.setRange(0, 72)
         self.spin_sub_hours.setValue(self.parent_app.sub_auto_update_hours)
@@ -757,6 +762,20 @@ class SettingsDialog(QDialog):
             if self.parent_app.use_tun else
             "Полный VPN (TUN) отключён"
         )
+
+    def import_warp_profile(self):
+        source, _ = QFileDialog.getOpenFileName(self, "Выберите wgcf-profile.conf", "", "WireGuard profile (*.conf);;Все файлы (*)")
+        if not source:
+            return
+        destination = os.path.join(WORK_DIR, "wgcf-profile.conf")
+        try:
+            shutil.copy2(source, destination)
+            if not builder.get_warp_settings(destination):
+                raise ValueError("не найден корректный раздел Interface/Peer")
+            self.parent_app.log("Импортирован личный WARP-профиль")
+            QMessageBox.information(self, "WARP", "Личный WARP-профиль импортирован. Он не попадает в релизы или GitHub.")
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "WARP", f"Не удалось импортировать профиль: {exc}")
 
     def apply_sub_hours(self, value):
         self.parent_app.sub_auto_update_hours = value

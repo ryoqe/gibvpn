@@ -13,10 +13,7 @@ helper_files = [
     'direct_domains.txt',
     'direct_apps.txt',
     'warp_domains.txt',
-    'wgcf-account.toml',
-    'wgcf-profile.conf',
     'ofont.ru_Zeequada.ttf',
-    'app_settings.json',
 ]
 
 # Files that live in the project directory and are copied as data files.

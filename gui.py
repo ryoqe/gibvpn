@@ -1377,7 +1377,10 @@ class GibVPNApp(QMainWindow):
         self.log(f"[CORE] Final xray PID: {self.xray_process.pid}")
         self.log(f"[CORE] SOCKS inbound: 127.0.0.1:10808")
         self.log(f"[CORE] HTTP inbound: 127.0.0.1:10809")
-        self.log("[ROUTING] ChatGPT/OpenAI -> WARP -> selected VPN server")
+        if builder.get_warp_settings():
+            self.log("[ROUTING] ChatGPT/OpenAI -> personal WARP -> selected VPN server")
+        else:
+            self.log("[ROUTING] ChatGPT/OpenAI -> selected VPN server (WARP profile not imported)")
         self._conn_name = (best_server.get("remark") or "").strip() or f"Server {best_index}"
         self._conn_ping_ms = ping_ms
         self._connected_at = time.time()

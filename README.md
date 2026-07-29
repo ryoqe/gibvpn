@@ -20,7 +20,7 @@
 👉 **[СКАЧАТЬ ПОСЛЕДНЮЮ РЕЛИЗНУЮ ВЕРСИЮ (GitHub Releases)](https://github.com/ryoqe/gibvpn/releases/latest)**
 
 Или прямая ссылка на архив релиза:
-- 📦 [GibVPN_Smart_v3.0.3_Windows_x64.zip](https://github.com/ryoqe/gibvpn/releases/download/v3.0.3/GibVPN_Smart_v3.0.3_Windows_x64.zip)
+- 📦 [GibVPN_Smart_v3.0.4_Windows_x64.zip](https://github.com/ryoqe/gibvpn/releases/download/v3.0.4/GibVPN_Smart_v3.0.4_Windows_x64.zip)
 
 ### 📂 Инструкция по запуску:
 1. Скачайте архив **`GibVPN_Smart_v3.0.0_Windows_x64.zip`**.
@@ -50,6 +50,8 @@
   - Автоматическая проверка и загрузка новых релизов с поддержкой прокси/VPN на случай блокировки GitHub в РФ.
 - **🌐 Полный VPN (TUN)**:
   - Весь TCP/UDP-трафик и DNS направляются через виртуальный адаптер; для включения нужны права администратора.
+- **🔐 Личный WARP-профиль**:
+  - Импортируйте свой `wgcf-profile.conf` в настройках. Ключ не включается в сборки или репозиторий.
 - **🌐 Поддерживаемые протоколы**:
   - `VLESS` (включая REALITY, XHTTP, gRPC, WebSocket, TCP), `VMess`, `Trojan`, `Shadowsocks`.
 

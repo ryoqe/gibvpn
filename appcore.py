@@ -715,7 +715,7 @@ def emergency_fix_internet():
     return True, log_lines
 
 
-CURRENT_APP_VERSION = "3.0.3"
+CURRENT_APP_VERSION = "3.0.4"
 
 
 def get_latest_github_app_info(repo=None):

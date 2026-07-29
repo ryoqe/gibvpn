@@ -674,6 +674,39 @@ def _find_file_path(filename):
     return filename
 
 
+def get_warp_settings(profile_path=None):
+    """Read a user-owned wgcf WireGuard profile; never use a shared key."""
+    path = profile_path or _find_file_path("wgcf-profile.conf")
+    if not os.path.exists(path):
+        return None
+    section = ""
+    values = {"interface": {}, "peer": {}}
+    try:
+        for raw_line in read_text_file(path):
+            line = raw_line.strip()
+            if not line or line.startswith(("#", ";")):
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                section = line[1:-1].strip().lower()
+                continue
+            key, separator, value = line.partition("=")
+            if separator and section in values:
+                values[section][key.strip().lower()] = value.strip()
+        interface = values["interface"]
+        peer = values["peer"]
+        addresses = [item.strip() for item in interface.get("address", "").split(",") if item.strip()]
+        if not interface.get("privatekey") or not addresses or not peer.get("publickey") or not peer.get("endpoint"):
+            return None
+        return {
+            "secretKey": interface["privatekey"], "address": addresses,
+            "peers": [{"publicKey": peer["publickey"], "endpoint": peer["endpoint"],
+                       "allowedIPs": ["0.0.0.0/0", "::/0"], "keepAlive": 15}],
+            "reserved": get_warp_reserved(), "mtu": int(interface.get("mtu", "1280")),
+        }
+    except (OSError, ValueError):
+        return None
+
+
 def generate_final_config(best_server, use_zapret=False, block_quic=True):
     direct_domains = ["domain:ru", "domain:рф", "domain:xn--p1ai"]
     if use_zapret:
@@ -761,32 +794,20 @@ def generate_final_config(best_server, use_zapret=False, block_quic=True):
     # settings as manual_server) is not polluted with the rewritten tag.
     best_server = dict(best_server)
     best_server["tag"] = "best-proxy"
+    warp_settings = get_warp_settings()
 
     outbounds = [
         best_server,
-        {
-            "tag": "warp-proxy",
-            "protocol": "wireguard",
-            "settings": {
-                "secretKey": "OB33xBOTHDt8x43dNretOiTcNaV60H/OrhG201aY+m8=",
-                "address": ["172.16.0.2/32", "2606:4700:110:8d70:8392:9047:6f07:6a3d/128"],
-                "peers": [{
-                    "publicKey": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-                    "endpoint": "engage.cloudflareclient.com:2408",
-                    "allowedIPs": ["0.0.0.0/0", "::/0"],
-                    "keepAlive": 15
-                }],
-                "reserved": get_warp_reserved(),
-                "mtu": 1280
-            },
-            "streamSettings": {
-                "sockopt": {"dialerProxy": "best-proxy"}
-            }
-        },
         {"tag": "direct", "protocol": "freedom"},
         {"tag": "blocked", "protocol": "blackhole"},
         {"tag": "api", "protocol": "freedom"}
     ]
+    if warp_settings:
+        outbounds.insert(1, {
+            "tag": "warp-proxy", "protocol": "wireguard",
+            "settings": warp_settings,
+            "streamSettings": {"sockopt": {"dialerProxy": "best-proxy"}},
+        })
 
     rules = [
         {"type": "field", "outboundTag": "api", "inboundTag": ["api-in"]},
@@ -817,20 +838,19 @@ def generate_final_config(best_server, use_zapret=False, block_quic=True):
             "network": "udp"
         })
 
-    rules.extend([
-        {
+    if warp_settings:
+        rules.append({
             "type": "field",
             "inboundTag": ["socks-in", "http-in"],
             "outboundTag": "warp-proxy",
             "domain": warp_domains
-        },
-        {
-            "type": "field",
-            "inboundTag": ["socks-in", "http-in"],
-            "outboundTag": "best-proxy",
-            "network": "tcp,udp"
-        }
-    ])
+        })
+    rules.append({
+        "type": "field",
+        "inboundTag": ["socks-in", "http-in"],
+        "outboundTag": "best-proxy",
+        "network": "tcp,udp"
+    })
 
     config = {
         "log": {"loglevel": "warning"},
