@@ -348,36 +348,50 @@ class GibVPNApp(QMainWindow):
         self.btn_toggle.setStyleSheet(self._pill_btn_style("#42A5F5"))
         self.btn_toggle.setToolTip("Запустить/остановить VPN")
         self.btn_toggle.clicked.connect(self.toggle_vpn)
-        big_btn_size = 84
-        small_btn_h = 48
-        group_gap = 45
+        mode_btn_size = 72
+        small_btn_h = 44
+        group_gap = 25
 
         self.bottom_panel = QWidget(self.central)
         self.bottom_panel.setStyleSheet("background-color: transparent;")
         self.bottom_layout = QHBoxLayout(self.bottom_panel)
         self.bottom_layout.setContentsMargins(0, 0, 0, 0)
-        self.bottom_layout.setSpacing(14)
+        self.bottom_layout.setSpacing(10)
 
         self.btn_min = QPushButton("МИН", self.bottom_panel)
-        self.btn_min.setFixedSize(big_btn_size, big_btn_size)
+        self.btn_min.setFixedSize(mode_btn_size, mode_btn_size)
         self.btn_min.setStyleSheet(self._round_btn_style(selected=True))
-        self.btn_min.setToolTip("Выбрать сервер с самым быстрым пингом")
+        self.btn_min.setToolTip("Выбрать сервер с наименьшим пингом (задержкой)")
         self.btn_min.clicked.connect(self.on_min_clicked)
 
         self.btn_max = QPushButton("МАКС", self.bottom_panel)
-        self.btn_max.setFixedSize(big_btn_size, big_btn_size)
+        self.btn_max.setFixedSize(mode_btn_size, mode_btn_size)
         self.btn_max.setStyleSheet(self._round_btn_style(selected=False))
         self.btn_max.setToolTip("Выбрать сервер с максимальной доступностью сайтов")
         self.btn_max.clicked.connect(self.on_max_clicked)
 
-        self.btn_ping = QPushButton("Пинг", self.bottom_panel)
-        self.btn_ping.setFixedSize(110, small_btn_h)
+        self.btn_speed = QPushButton("СКОРОСТЬ", self.bottom_panel)
+        self.btn_speed.setFixedSize(mode_btn_size, mode_btn_size)
+        self.btn_speed.setStyleSheet(self._round_btn_style(selected=False))
+        self.btn_speed.setToolTip("Выбрать сервер с наибольшей скоростью скачивания (МБ/с)")
+        self.btn_speed.clicked.connect(self.on_speed_clicked)
+
+        self.btn_auto = QPushButton("АВТО", self.bottom_panel)
+        self.btn_auto.setFixedSize(mode_btn_size, mode_btn_size)
+        self.btn_auto.setStyleSheet(self._round_btn_style(selected=False))
+        self.btn_auto.setToolTip("Автоматически протестировать пинг, сайты и скорость и выбрать лучший сервер")
+        self.btn_auto.clicked.connect(self.on_auto_clicked)
+
+        self.btn_ping = QPushButton("ПИНГ", self.bottom_panel)
+        self.btn_ping.setFixedSize(95, small_btn_h)
         self.btn_ping.setStyleSheet(self._pill_btn_style())
         self.btn_ping.setToolTip("Проверить пинг до выбранных сервисов")
         self.btn_ping.clicked.connect(self.on_ping_clicked)
 
         self.bottom_layout.addWidget(self.btn_min)
         self.bottom_layout.addWidget(self.btn_max)
+        self.bottom_layout.addWidget(self.btn_speed)
+        self.bottom_layout.addWidget(self.btn_auto)
         self.bottom_layout.addSpacing(group_gap)
         self.bottom_layout.addWidget(self.btn_ping)
         self.bottom_layout.addStretch(1)
@@ -518,10 +532,16 @@ class GibVPNApp(QMainWindow):
     def _update_mode_buttons(self):
         self.btn_min.setStyleSheet(self._round_btn_style(selected=(self.current_mode == "min")))
         self.btn_max.setStyleSheet(self._round_btn_style(selected=(self.current_mode == "max")))
+        self.btn_speed.setStyleSheet(self._round_btn_style(selected=(self.current_mode == "speed")))
+        self.btn_auto.setStyleSheet(self._round_btn_style(selected=(self.current_mode == "auto")))
 
     def _start_current_mode(self):
         if self.current_mode == "max":
             self._run_vpn_worker(self.smart_start_max_availability)
+        elif self.current_mode == "speed":
+            self._run_vpn_worker(self.smart_start_speed)
+        elif self.current_mode == "auto":
+            self._run_vpn_worker(self.smart_start_auto)
         else:
             self._run_vpn_worker(self.smart_start_vpn)
 
@@ -539,6 +559,24 @@ class GibVPNApp(QMainWindow):
         self.save_settings()
         self._update_mode_buttons()
         self.log("Режим VPN: МАКС (максимальная доступность)")
+        if self.is_running:
+            self.stop_vpn()
+            self._start_current_mode()
+
+    def on_speed_clicked(self):
+        self.current_mode = "speed"
+        self.save_settings()
+        self._update_mode_buttons()
+        self.log("Режим VPN: СКОРОСТЬ (выбор самого быстрого)")
+        if self.is_running:
+            self.stop_vpn()
+            self._start_current_mode()
+
+    def on_auto_clicked(self):
+        self.current_mode = "auto"
+        self.save_settings()
+        self._update_mode_buttons()
+        self.log("Режим VPN: АВТО (комплексный выбор лучшего сервера)")
         if self.is_running:
             self.stop_vpn()
             self._start_current_mode()
@@ -913,6 +951,173 @@ class GibVPNApp(QMainWindow):
 
         if source == "favorite" and regular_pairs:
             self._start_background_regular_test(regular_pairs, best_metric, mode="max")
+
+    def smart_start_speed(self):
+        try:
+            self._reconnect_in_progress = True
+            self._smart_start_speed_inner()
+        except Exception as e:
+            log_exception("smart_start_speed crashed")
+            self.set_status(f"Error: {e}", "red")
+            self.log(f"CRITICAL ERROR: {e}")
+            self.is_running = False
+            self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
+        finally:
+            self._reconnect_in_progress = False
+
+    def _smart_start_speed_inner(self):
+        self.is_running = True
+        self._connected_at = None
+
+        if not os.path.exists(os.path.join(WORK_DIR, "xray.exe")) and not os.path.exists("xray.exe"):
+            self.set_status("Error: xray.exe not found", "red")
+            self.log(f"ERROR: xray.exe не найден в {WORK_DIR}!")
+            self.is_running = False
+            self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
+            return
+
+        servers, sub = self._collect_servers_for_start()
+        if servers is None:
+            self.is_running = False
+            self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
+            return
+        self._servers = servers
+
+        favorites, regular, blocked = self._filter_servers(servers, sub)
+        candidates = [(i, s) for i, s in enumerate(servers) if s in favorites]
+        if not candidates:
+            ping_results = self._run_ping_test([(i, s) for i, s in enumerate(servers) if s in regular])
+            if ping_results:
+                ping_results.sort(key=lambda x: x[1])
+                top_indices = [idx for idx, _ in ping_results[:5]]
+                candidates = [(i, servers[i]) for i in top_indices]
+
+        if not candidates:
+            self.set_status("NO SERVERS RESPONDED", "red")
+            self.is_running = False
+            self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
+            return
+
+        self.set_status(f"SPEED-TESTING {len(candidates)} SERVERS...", "orange")
+        self.log(f"[SPEED] Testing download speed of {len(candidates)} candidate servers...")
+
+        best_index = None
+        best_server = None
+        best_bps = -1.0
+
+        for orig_i, srv in candidates:
+            try:
+                builder.generate_final_config(srv, use_zapret=False, block_quic=True)
+                proc = self._spawn_xray(is_test=True)
+                time.sleep(0.3)
+                speed_bps, sp_str = builder.measure_server_speed(10808, timeout=2.0)
+                self._reap_xray(proc)
+                key = builder.server_key(srv)
+                self.log(f"[SPEED] Server #{orig_i} ({key}): {sp_str}")
+                if sub:
+                    sub.setdefault("speeds", {})[key] = speed_bps
+                if speed_bps > best_bps:
+                    best_bps = speed_bps
+                    best_index = orig_i
+                    best_server = srv
+            except Exception as e:
+                self.log(f"[SPEED] Server #{orig_i} test failed: {e}")
+
+        if best_server is None:
+            best_index, best_server = candidates[0]
+            best_bps = 0.0
+
+        self.log(f"[SPEED] Winner: #{best_index} ({builder.fmt_speed(best_bps)})")
+        self._start_best_server(best_server, best_index, 0)
+
+    def smart_start_auto(self):
+        try:
+            self._reconnect_in_progress = True
+            self._smart_start_auto_inner()
+        except Exception as e:
+            log_exception("smart_start_auto crashed")
+            self.set_status(f"Error: {e}", "red")
+            self.log(f"CRITICAL ERROR: {e}")
+            self.is_running = False
+            self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
+        finally:
+            self._reconnect_in_progress = False
+
+    def _smart_start_auto_inner(self):
+        self.is_running = True
+        self._connected_at = None
+
+        if not os.path.exists(os.path.join(WORK_DIR, "xray.exe")) and not os.path.exists("xray.exe"):
+            self.set_status("Error: xray.exe not found", "red")
+            self.log(f"ERROR: xray.exe не найден в {WORK_DIR}!")
+            self.is_running = False
+            self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
+            return
+
+        servers, sub = self._collect_servers_for_start()
+        if servers is None:
+            self.is_running = False
+            self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
+            return
+        self._servers = servers
+
+        favorites, regular, blocked = self._filter_servers(servers, sub)
+        candidates = [(i, s) for i, s in enumerate(servers) if s in favorites]
+        if not candidates:
+            candidates = [(i, s) for i, s in enumerate(servers) if s in regular]
+
+        if not candidates:
+            self.set_status("NO VALID SERVERS", "red")
+            self.is_running = False
+            self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
+            return
+
+        self.set_status(f"AUTO-EVALUATING {len(candidates)} SERVERS...", "orange")
+        self.log(f"[AUTO] Running combined Auto test (ping + sites + speed) for {len(candidates)} servers...")
+
+        avail_results = self._run_availability_test(candidates)
+        if not avail_results:
+            self.set_status("ALL SERVERS FAILED", "red")
+            self.is_running = False
+            self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
+            return
+
+        avail_results.sort(key=lambda x: (-x[1], x[2]))
+        top_candidates = avail_results[:3]
+
+        best_idx = None
+        best_server = None
+        best_score = -999999.0
+
+        for idx, sites_count, ping_sec in top_candidates:
+            srv = servers[idx]
+            key = builder.server_key(srv)
+            speed_bps = 0.0
+            try:
+                builder.generate_final_config(srv, use_zapret=False, block_quic=True)
+                proc = self._spawn_xray(is_test=True)
+                time.sleep(0.3)
+                speed_bps, sp_str = builder.measure_server_speed(10808, timeout=2.0)
+                self._reap_xray(proc)
+            except Exception:
+                pass
+
+            speed_mbps = speed_bps / (1024 * 1024)
+            ping_ms = ping_sec * 1000
+            score = (sites_count * 100) + (speed_mbps * 50) - (ping_ms * 0.5)
+
+            self.log(f"[AUTO] Server #{idx}: sites={sites_count}, ping={int(ping_ms)}ms, speed={builder.fmt_speed(speed_bps)} -> Score={score:.1f}")
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+                best_server = srv
+
+        if best_server is None:
+            best_idx = top_candidates[0][0]
+            best_server = servers[best_idx]
+
+        self.log(f"[AUTO] Selected Best Server: #{best_idx} with composite score {best_score:.1f}")
+        self._start_best_server(best_server, best_idx, 0)
 
     def ping_test_proxy(self, port, result_list, index):
         proxies = {
