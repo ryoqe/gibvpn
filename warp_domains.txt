@@ -1,0 +1,22 @@
+# Список доменов, которые должны идти через WARP (Cloudflare)
+# Каждый домен с новой строки.
+# Пример: domain:rutracker.org
+
+domain:rutracker.org
+
+# Gemini (веб, API, AI Studio) — полный список
+geosite:google-gemini
+domain:gemini.com
+domain:gemini.google.com
+domain:bard.google.com
+domain:aistudio.google.com
+domain:makersuite.google.com
+domain:ai.google.dev
+domain:deepmind.google
+domain:generativelanguage.googleapis.com
+domain:gemini.gstatic.com
+domain:geller-pa.googleapis.com
+domain:alkalimakersuite-pa.clients6.google.com
+domain:webchannel-alkalimakersuite-pa.clients6.google.com
+domain:proactivebackend-pa.googleapis.com
+domain:robinfrontend-pa.googleapis.com

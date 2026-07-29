@@ -1,0 +1,41 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# PyInstaller / Build outputs
+build/
+dist/
+*.spec
+
+# Bundled binaries & large assets (downloaded on build/first run)
+xray.exe
+geoip.dat
+geosite.dat
+zapret_bin/
+assets/
+screenshots/
+gui_preview.png
+settings_preview.png
+ofont.ru_Zeequada.ttf
+
+# User local settings, subscriptions, and private keys (DO NOT COMMIT)
+app_settings.json
+decoded_sub*.txt
+wgcf-account.toml
+wgcf-profile.conf
+
+# Generated runtime logs & locks
+config.json
+gibvpn_error.log*
+xray_test.log
+gibvpn.lock
+
+# Virtual environment & IDE
+venv/
+.idea/
+.vscode/
+.DS_Store

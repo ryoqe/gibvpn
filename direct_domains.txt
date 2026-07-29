@@ -1,0 +1,11 @@
+# Список доменов, которые должны работать НАПРЯМУЮ (без VPN)
+# Каждый домен с новой строки.
+# Пример: domain:vk.com
+# Пример: domain:yandex.ru
+# Пример: domain:ru
+
+domain:vk.com
+domain:yandex.ru
+domain:ru
+domain:рф
+domain:xn--p1ai

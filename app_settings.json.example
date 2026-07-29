@@ -1,0 +1,30 @@
+{
+  "overlay_color": [173, 216, 230, 120],
+  "top_image_path": null,
+  "bottom_image_path": null,
+  "top_crop": 0,
+  "bottom_crop": 0,
+  "top_offset_x": 0,
+  "top_offset_y": 0,
+  "bottom_offset_x": 0,
+  "bottom_offset_y": 0,
+  "current_mode": "min",
+  "check_sites": {
+    "Google": "http://www.google.com/generate_204",
+    "Cloudflare": "http://cp.cloudflare.com/generate_204",
+    "GStatic": "http://connectivitycheck.gstatic.com/generate_204",
+    "Telegram": "https://t.me",
+    "Yandex": "http://ya.ru"
+  },
+  "custom_links": [],
+  "subscriptions": [],
+  "active_subscription_index": 0,
+  "autostart_enabled": false,
+  "sub_auto_update_hours": 24,
+  "ping_timeout": 5.0,
+  "ping_attempts": 3,
+  "use_zapret": false,
+  "zapret_dir": "",
+  "zapret_preset": "general.bat",
+  "block_quic": true
+}

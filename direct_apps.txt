@@ -1,0 +1,10 @@
+# Приложения, которые идут напрямую (не через VPN)
+# Яндекс Браузер
+C:\Program Files\Yandex\YandexBrowser\Application\browser.exe
+C:\Program Files\Yandex\YandexBrowser\Application\browser_proxy.exe
+# Steam
+C:\Program Files (x86)\Steam\steam.exe
+# Battlefield 2042
+C:\Program Files (x86)\Steam\steamapps\common\Battlefield 2042\BF2042.exe
+# Counter-Strike 2
+C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\cs2.exe
