@@ -10,6 +10,15 @@ from appcore import WORK_DIR
 # Loopback port of the Xray API inbound (StatsService) in the final config.
 XRAY_API_PORT = 10085
 
+# ChatGPT uses more than one first-party hostname.  Keep this list in one
+# place so routing rules and diagnostics describe the same traffic class.
+GPT_DOMAINS = [
+    "domain:chatgpt.com",
+    "domain:openai.com",
+    "domain:oaistatic.com",
+    "domain:oaiusercontent.com",
+]
+
 
 def _bytes_to_text(raw):
     """Decode bytes to text, tolerating UTF-8 and UTF-16 (BOM or not).
@@ -695,8 +704,6 @@ def generate_final_config(best_server, use_zapret=False, block_quic=True):
             "domain:rutor.info",
             "domain:nnmclub.to",
             "domain:lostfilm.tv",
-            "domain:chatgpt.com",
-            "domain:openai.com",
             "domain:notion.so",
             "domain:canva.com",
             "domain:steampowered.com",
@@ -722,7 +729,6 @@ def generate_final_config(best_server, use_zapret=False, block_quic=True):
         "geosite:openai",
         "geosite:google",
         "domain:ai.com",
-        "domain:chatgpt.com",
         "domain:gemini.com",
         "domain:gemini.google.com",
         "domain:bard.google.com",
@@ -741,7 +747,8 @@ def generate_final_config(best_server, use_zapret=False, block_quic=True):
         "domain:goog",
         "domain:antigravity-unleash.goog",
         "domain:googleapis.com",
-        "domain:google.com"
+        "domain:google.com",
+        *GPT_DOMAINS,
     ]
     wd_file = _find_file_path('warp_domains.txt')
     if os.path.exists(wd_file):
@@ -921,4 +928,3 @@ def fmt_speed(speed_bps):
         return f"{mbps:.1f} MB/s"
     kbps = speed_bps / 1024
     return f"{kbps:.0f} KB/s"
-

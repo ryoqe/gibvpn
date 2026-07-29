@@ -604,7 +604,7 @@ def emergency_fix_internet():
     return True, log_lines
 
 
-CURRENT_APP_VERSION = "3.0.0"
+CURRENT_APP_VERSION = "3.0.1"
 
 
 def get_latest_github_app_info(repo=None):
@@ -678,4 +678,3 @@ del "%~f0"
         return True, "Обновление скачано! Перезапуск приложения..."
     else:
         return True, f"Файл обновления сохранён в {dest_path}"
-

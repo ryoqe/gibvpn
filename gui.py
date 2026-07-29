@@ -76,6 +76,10 @@ class GibVPNApp(QMainWindow):
             "Telegram": "https://t.me",
             "Yandex": "http://ya.ru"
         }
+        self.gpt_check_urls = {
+            "ChatGPT": "https://chatgpt.com/api/auth/session",
+            "OpenAI auth": "https://auth.openai.com/",
+        }
         self.proxy_dict = {
             "http": "http://127.0.0.1:10809",
             "https": "http://127.0.0.1:10809"
@@ -206,6 +210,13 @@ class GibVPNApp(QMainWindow):
         self.btn_ping_sites_dlg.setToolTip("Настроить список сайтов для проверки доступности в режиме МАКС")
         self.btn_ping_sites_dlg.clicked.connect(self.open_ping_sites_dialog)
         self.left_layout.addWidget(self.btn_ping_sites_dlg)
+
+        self.btn_gpt_check = QPushButton("🧠 Проверить GPT", self.left_panel)
+        self.btn_gpt_check.setStyleSheet(left_btn_style)
+        self.btn_gpt_check.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_gpt_check.setToolTip("Проверить ChatGPT и OpenAI через запущенный VPN")
+        self.btn_gpt_check.clicked.connect(self.on_gpt_check_clicked)
+        self.left_layout.addWidget(self.btn_gpt_check)
 
         self.warp_link = QPushButton("🚀 WARP домены", self.left_panel)
         self.warp_link.setStyleSheet(left_btn_style)
@@ -1317,6 +1328,7 @@ class GibVPNApp(QMainWindow):
         self.log(f"[CORE] Final xray PID: {self.xray_process.pid}")
         self.log(f"[CORE] SOCKS inbound: 127.0.0.1:10808")
         self.log(f"[CORE] HTTP inbound: 127.0.0.1:10809")
+        self.log("[ROUTING] ChatGPT/OpenAI -> WARP -> selected VPN server")
         self._conn_name = (best_server.get("remark") or "").strip() or f"Server {best_index}"
         self._conn_ping_ms = ping_ms
         self._connected_at = time.time()
@@ -1476,6 +1488,37 @@ class GibVPNApp(QMainWindow):
         self.log("Проверка пинга до выбранных сервисов...")
         for name, url in self.check_sites.items():
             threading.Thread(target=self._ping_worker, args=(name, url), daemon=True).start()
+
+    def on_gpt_check_clicked(self):
+        """Run a small authenticated-endpoint reachability check through Xray.
+
+        A 401/403 response still proves that the OpenAI edge was reached: it is
+        preferable to treating it as a network failure and switching servers.
+        """
+        if not self.is_running:
+            self.log("GPT: VPN не запущен — проверка невозможна.")
+            return
+        self.log("GPT: проверяю ChatGPT и OpenAI через VPN...")
+        for name, url in self.gpt_check_urls.items():
+            threading.Thread(target=self._gpt_check_worker, args=(name, url), daemon=True).start()
+
+    def _gpt_check_worker(self, name, url):
+        started = time.time()
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            response = session.get(
+                url, proxies=self.proxy_dict, timeout=(3.0, 12.0),
+                allow_redirects=True,
+                headers={"User-Agent": "GibVPN/3.0"},
+            )
+            elapsed = int((time.time() - started) * 1000)
+            if response.status_code in (200, 204, 401, 403):
+                self.log(f"GPT: {name} доступен через WARP ({response.status_code}, {elapsed}ms)")
+            else:
+                self.log(f"GPT: {name} ответил HTTP {response.status_code} ({elapsed}ms)")
+        except requests.RequestException as exc:
+            self.log(f"GPT: {name} недоступен через VPN ({type(exc).__name__})")
 
     def _ping_worker(self, name, url):
         start_time = time.time()
