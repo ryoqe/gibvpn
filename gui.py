@@ -48,6 +48,7 @@ class GibVPNApp(QMainWindow):
 
         self.is_running = False
         self.xray_process = None
+        self.tun_process = None
         self._xray_processes = set()
         self.current_mode = "min"
         self._traffic_up = 0
@@ -90,6 +91,7 @@ class GibVPNApp(QMainWindow):
         self.autostart_enabled = False
         self.auto_reconnect = False
         self.use_system_proxy = True
+        self.use_tun = False
         self._system_proxy_snapshot = None
         self.sub_auto_update_hours = 24
         self._sub_update_running = False
@@ -762,6 +764,24 @@ class GibVPNApp(QMainWindow):
             self._xray_processes.add(proc)
         return proc
 
+    def _spawn_tun(self):
+        singbox_exe = appcore.find_singbox_exe()
+        if not singbox_exe:
+            raise RuntimeError("sing-box.exe не найден в папке программы")
+        config_path = builder.generate_tun_config()
+        proc = subprocess.Popen(
+            [singbox_exe, "run", "-c", config_path],
+            cwd=os.path.dirname(singbox_exe),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        time.sleep(0.6)
+        if proc.poll() is not None:
+            error = (proc.stderr.read() or b"").decode("utf-8", errors="replace").strip()
+            raise RuntimeError(error or "sing-box не смог создать TUN-адаптер")
+        return proc
+
     def _reap_xray(self, proc):
         if proc is not None:
             try:
@@ -1309,6 +1329,16 @@ class GibVPNApp(QMainWindow):
             self._reconnect_in_progress = False
 
     def _start_best_server(self, best_server, best_index, ping_ms, start_watcher=True):
+        if self.use_tun and not appcore.is_windows_admin():
+            self.is_running = False
+            self.set_status("TUN REQUIRES ADMIN", "red")
+            self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
+            self.show_dialog_signal.emit(
+                "warning", "Нужны права администратора",
+                "Полный VPN (TUN) создаёт виртуальный сетевой адаптер. "
+                "Перезапустите GibVPN от имени администратора и подключитесь снова."
+            )
+            return
         use_zap = getattr(self, "use_zapret", False)
         builder.generate_final_config(best_server, use_zapret=use_zap, block_quic=getattr(self, "block_quic", True))
 
@@ -1328,7 +1358,15 @@ class GibVPNApp(QMainWindow):
             time.sleep(0.2)
 
         self.xray_process = self._spawn_xray()
-        if self.use_system_proxy:
+        if self.use_tun:
+            try:
+                self.tun_process = self._spawn_tun()
+                self.log("[TUN] Полный VPN включён: весь TCP/UDP и DNS идут через VPN")
+            except Exception:
+                self._reap_xray(self.xray_process)
+                self.xray_process = None
+                raise
+        elif self.use_system_proxy:
             try:
                 self._system_proxy_snapshot = appcore.enable_windows_system_proxy()
                 appcore.save_windows_system_proxy_backup(self._system_proxy_snapshot)
@@ -1432,6 +1470,17 @@ class GibVPNApp(QMainWindow):
             except Exception:
                 pass
             self._background_thread = None
+        if self.tun_process:
+            try:
+                self.tun_process.terminate()
+                self.tun_process.wait(timeout=3)
+            except Exception:
+                try:
+                    self.tun_process.kill()
+                except Exception:
+                    pass
+            self.tun_process = None
+            self.log("[TUN] Виртуальный VPN-адаптер остановлен")
         if self.xray_process:
             self._reap_xray(self.xray_process)
             self.xray_process = None
@@ -1988,6 +2037,7 @@ class GibVPNApp(QMainWindow):
                 self.sub_auto_update_hours = data.get("sub_auto_update_hours", 24)
                 self.block_quic = data.get("block_quic", True)
                 self.use_system_proxy = data.get("use_system_proxy", True)
+                self.use_tun = data.get("use_tun", False)
 
                 self.use_zapret = data.get("use_zapret", False)
                 self.zapret_dir = data.get("zapret_dir", self.zapret_dir)
@@ -2044,6 +2094,7 @@ class GibVPNApp(QMainWindow):
             "sub_auto_update_hours": self.sub_auto_update_hours,
             "block_quic": self.block_quic,
             "use_system_proxy": self.use_system_proxy,
+            "use_tun": self.use_tun,
             "use_zapret": getattr(self, "use_zapret", False),
             "zapret_dir": getattr(self, "zapret_dir", ""),
             "zapret_preset": getattr(self, "zapret_preset", "general.bat"),

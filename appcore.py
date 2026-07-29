@@ -32,7 +32,7 @@ def get_app_dir():
         base_src = os.path.dirname(os.path.abspath(__file__))
 
     # Seed initial user configuration files if not present in APPDATA
-    for item in ("app_settings.json", "direct_domains.txt", "direct_apps.txt", "warp_domains.txt", "assets"):
+    for item in ("app_settings.json", "direct_domains.txt", "direct_apps.txt", "warp_domains.txt", "assets", "singbox_bin"):
         src = os.path.join(base_src, item)
         dst = os.path.join(app_data_dir, item)
         if not os.path.exists(src) and item == "app_settings.json":
@@ -91,6 +91,25 @@ def get_work_dir(app_dir):
         return meipass
 
     return app_dir
+
+
+def find_singbox_exe():
+    """Find the bundled sing-box executable without relying on PATH."""
+    base = os.path.join(WORK_DIR, "singbox_bin")
+    if not os.path.isdir(base):
+        return None
+    for root, _dirs, files in os.walk(base):
+        if "sing-box.exe" in files:
+            return os.path.join(root, "sing-box.exe")
+    return None
+
+
+def is_windows_admin():
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
 
 
 APP_DIR = get_app_dir()
@@ -696,7 +715,7 @@ def emergency_fix_internet():
     return True, log_lines
 
 
-CURRENT_APP_VERSION = "3.0.2"
+CURRENT_APP_VERSION = "3.0.3"
 
 
 def get_latest_github_app_info(repo=None):

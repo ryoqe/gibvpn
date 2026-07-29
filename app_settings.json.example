@@ -27,5 +27,6 @@
   "zapret_dir": "",
   "zapret_preset": "general.bat",
   "block_quic": true,
-  "use_system_proxy": true
+  "use_system_proxy": true,
+  "use_tun": false
 }

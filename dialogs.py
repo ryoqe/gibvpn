@@ -516,6 +516,12 @@ class SettingsDialog(QDialog):
         self.chk_system_proxy.stateChanged.connect(self.apply_system_proxy)
         form_misc.addRow(self.chk_system_proxy)
 
+        self.chk_tun = QCheckBox("Полный VPN (TUN): направлять весь трафик через туннель")
+        self.chk_tun.setChecked(self.parent_app.use_tun)
+        self.chk_tun.setToolTip("Создаёт виртуальный адаптер. Требуются права администратора; системный прокси в этом режиме не используется.")
+        self.chk_tun.stateChanged.connect(self.apply_tun)
+        form_misc.addRow(self.chk_tun)
+
         self.spin_sub_hours = QSpinBox()
         self.spin_sub_hours.setRange(0, 72)
         self.spin_sub_hours.setValue(self.parent_app.sub_auto_update_hours)
@@ -741,6 +747,15 @@ class SettingsDialog(QDialog):
             "Системный прокси будет включаться при следующем подключении"
             if self.parent_app.use_system_proxy else
             "Системный прокси отключён для следующих подключений"
+        )
+
+    def apply_tun(self, state):
+        self.parent_app.use_tun = (state == Qt.CheckState.Checked.value)
+        self.parent_app.save_settings()
+        self.parent_app.log(
+            "Полный VPN (TUN) будет включён при следующем подключении"
+            if self.parent_app.use_tun else
+            "Полный VPN (TUN) отключён"
         )
 
     def apply_sub_hours(self, value):

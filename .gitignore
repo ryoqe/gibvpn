@@ -24,6 +24,7 @@ xray.exe
 geoip.dat
 geosite.dat
 zapret_bin/
+singbox_bin/
 assets/
 screenshots/
 gui_preview.png

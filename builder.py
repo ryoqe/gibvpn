@@ -9,6 +9,7 @@ from appcore import WORK_DIR
 
 # Loopback port of the Xray API inbound (StatsService) in the final config.
 XRAY_API_PORT = 10085
+SINGBOX_TUN_CONFIG = "singbox_tun.json"
 
 # ChatGPT uses more than one first-party hostname.  Keep this list in one
 # place so routing rules and diagnostics describe the same traffic class.
@@ -876,6 +877,50 @@ def generate_final_config(best_server, use_zapret=False, block_quic=True):
         json.dump(config, f, indent=2)
 
     return True
+
+
+def generate_tun_config():
+    """Generate a full-device TUN config that forwards every packet to Xray.
+
+    Xray still owns server selection and transport.  sing-box only creates the
+    Windows virtual adapter, hijacks DNS, and transparently sends TCP/UDP to
+    the local SOCKS inbound.
+    """
+    config = {
+        "log": {"level": "warn"},
+        "dns": {
+            "servers": [{
+                "tag": "remote-dns",
+                "type": "https",
+                "server": "1.1.1.1",
+                "path": "/dns-query",
+                "detour": "xray-out",
+            }],
+            "final": "remote-dns",
+        },
+        "inbounds": [{
+            "type": "tun",
+            "tag": "tun-in",
+            "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+            "mtu": 1400,
+            "auto_route": True,
+            "strict_route": True,
+            "stack": "system",
+        }],
+        "outbounds": [
+            {"type": "socks", "tag": "xray-out", "server": "127.0.0.1", "server_port": 10808},
+            {"type": "direct", "tag": "direct"},
+        ],
+        "route": {
+            "auto_detect_interface": True,
+            "rules": [{"action": "hijack-dns", "protocol": "dns"}],
+            "final": "xray-out",
+        },
+    }
+    config_path = os.path.join(WORK_DIR, SINGBOX_TUN_CONFIG)
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+    return config_path
 
 
 def measure_server_speed(port, timeout=2.5):
