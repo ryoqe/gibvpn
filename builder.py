@@ -869,3 +869,56 @@ def generate_final_config(best_server, use_zapret=False, block_quic=True):
         json.dump(config, f, indent=2)
 
     return True
+
+
+def measure_server_speed(port, timeout=2.5):
+    """
+    Measure download speed (in bytes/sec) through local SOCKS proxy on given port.
+    Returns (bytes_per_sec: float, formatted_str: str).
+    """
+    import time
+    import requests
+
+    proxies = {
+        "http": f"socks5h://127.0.0.1:{port}",
+        "https": f"socks5h://127.0.0.1:{port}"
+    }
+
+    test_urls = [
+        "https://speed.cloudflare.com/__down?bytes=1000000",
+        "https://www.google.com/generate_204",
+        "http://cp.cloudflare.com/generate_204"
+    ]
+
+    s = requests.Session()
+    s.trust_env = False
+
+    for url in test_urls:
+        try:
+            start_time = time.time()
+            r = s.get(url, proxies=proxies, timeout=(1.5, timeout), stream=True)
+            if r.status_code in (200, 204):
+                received = 0
+                for chunk in r.iter_content(chunk_size=8192):
+                    received += len(chunk)
+                    if time.time() - start_time >= timeout:
+                        break
+                elapsed = max(0.001, time.time() - start_time)
+                speed_bps = received / elapsed
+                return speed_bps, fmt_speed(speed_bps)
+        except Exception:
+            continue
+
+    return 0.0, "FAIL"
+
+
+def fmt_speed(speed_bps):
+    """Format speed in bytes/sec to human readable MB/s or KB/s."""
+    if speed_bps <= 0:
+        return "FAIL"
+    mbps = speed_bps / (1024 * 1024)
+    if mbps >= 1.0:
+        return f"{mbps:.1f} MB/s"
+    kbps = speed_bps / 1024
+    return f"{kbps:.0f} KB/s"
+

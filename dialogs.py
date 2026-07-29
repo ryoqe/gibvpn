@@ -1269,21 +1269,44 @@ def _ping_color(ms):
     return "#FF3B30"
 
 
+class _SpeedItem(QTableWidgetItem):
+    """Speed cell sorting numerically in bytes/sec; unknown/FAIL go last."""
+
+    def __lt__(self, other):
+        def _val(item):
+            v = item.data(Qt.ItemDataRole.UserRole + 1)
+            return v if isinstance(v, (int, float)) else -1
+        return _val(self) < _val(other)
+
+
+def _speed_color(speed_bps):
+    mbps = speed_bps / (1024 * 1024)
+    if mbps >= 5.0:
+        return "#2DB14E"
+    if mbps >= 1.0:
+        return "#D97A00"
+    return "#FF3B30"
+
+
 class ServerListDialog(QDialog):
-    """Диалог со списком серверов, избранным, ручным выбором и пингом."""
+    """Диалог со списком серверов, избранным, ручным выбором, пингом и замером скорости."""
 
     ping_update = pyqtSignal(int, str)
     ping_finished = pyqtSignal()
+    speed_update = pyqtSignal(int, float, str)
+    speed_finished = pyqtSignal()
 
     def __init__(self, parent):
         super().__init__(parent, Qt.WindowType.Dialog)
         self.setWindowTitle("Серверы")
-        self.setMinimumSize(820, 480)
-        self.resize(980, 580)
+        self.setMinimumSize(860, 500)
+        self.resize(1020, 600)
         self.parent_app = parent
         self.setFont(parent.font())
         self.ping_update.connect(self._on_ping_update)
         self.ping_finished.connect(self._on_ping_finished)
+        self.speed_update.connect(self._on_speed_update)
+        self.speed_finished.connect(self._on_speed_finished)
         self.setStyleSheet("""
             QDialog { background-color: #F2F2F7; }
             QLabel { color: #1a1a1a; font-size: 14px; }
@@ -1316,11 +1339,17 @@ class ServerListDialog(QDialog):
         self._setup_ui()
 
     def _load_servers(self):
-        sub = self.parent_app._active_subscription()
-        if sub is None:
+        idx = self.parent_app.active_subscription_index
+        if idx == -1:
             self.servers = []
+            for sub in self.parent_app.subscriptions:
+                self.servers.extend(self.parent_app._load_servers_for_subscription(sub))
         else:
-            self.servers = self.parent_app._load_servers_for_subscription(sub)
+            sub = self.parent_app._active_subscription()
+            if sub is None:
+                self.servers = []
+            else:
+                self.servers = self.parent_app._load_servers_for_subscription(sub)
         self._custom_offset = len(self.servers)
         self.servers = self.servers + self.parent_app._get_custom_servers()
 
@@ -1341,6 +1370,12 @@ class ServerListDialog(QDialog):
 
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
+
+        self.sub_select_combo = QComboBox()
+        self._populate_sub_combo()
+        self.sub_select_combo.currentIndexChanged.connect(self._on_sub_combo_changed)
+        toolbar.addWidget(self.sub_select_combo)
+
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Поиск: название, адрес, протокол...")
         self.search_edit.setClearButtonEnabled(True)
@@ -1362,8 +1397,8 @@ class ServerListDialog(QDialog):
         toolbar.addWidget(self.country_combo)
         layout.addLayout(toolbar)
 
-        self.table = QTableWidget(len(self.servers), 6)
-        self.table.setHorizontalHeaderLabels(["№", "Название", "Сервер", "Пинг", "Статус", "Протокол"])
+        self.table = QTableWidget(len(self.servers), 7)
+        self.table.setHorizontalHeaderLabels(["№", "Название", "Сервер", "Пинг", "Скорость", "Статус", "Протокол"])
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
@@ -1387,6 +1422,11 @@ class ServerListDialog(QDialog):
         self.btn_ping = QPushButton("Пинг")
         self.btn_ping.clicked.connect(self.ping_selected)
         btn_layout.addWidget(self.btn_ping)
+
+        self.btn_speed = QPushButton("⚡ Скорость")
+        self.btn_speed.setToolTip("Замерить реальную скорость скачивания выбранных серверов (в МБ/с)")
+        self.btn_speed.clicked.connect(self.speed_selected)
+        btn_layout.addWidget(self.btn_speed)
 
         self.btn_fav = QPushButton("★ Избранное")
         self.btn_fav.clicked.connect(lambda: self.set_state("favorite"))
@@ -1419,6 +1459,27 @@ class ServerListDialog(QDialog):
 
         layout.addLayout(btn_layout)
 
+    def _populate_sub_combo(self):
+        self.sub_select_combo.blockSignals(True)
+        self.sub_select_combo.clear()
+        self.sub_select_combo.addItem("★ Все подписки (Объединённый список)", -1)
+        for i, sub in enumerate(self.parent_app.subscriptions):
+            name = sub.get("name", "Подписка")
+            self.sub_select_combo.addItem(f"📋 {name}", i)
+        cur_idx = self.parent_app.active_subscription_index
+        idx_to_select = 0 if cur_idx == -1 else (cur_idx + 1 if 0 <= cur_idx < len(self.parent_app.subscriptions) else 0)
+        self.sub_select_combo.setCurrentIndex(idx_to_select)
+        self.sub_select_combo.blockSignals(False)
+
+    def _on_sub_combo_changed(self, combo_idx):
+        val = self.sub_select_combo.currentData()
+        if val is not None:
+            self.parent_app.active_subscription_index = val
+            self.parent_app.save_settings()
+            self._load_servers()
+            self._fill_table()
+            self._populate_countries()
+
     def _populate_countries(self):
         self.country_combo.clear()
         self.country_combo.addItem("Все страны", None)
@@ -1434,6 +1495,7 @@ class ServerListDialog(QDialog):
         sub = self.parent_app._active_subscription()
         states = sub.get("states", {}) if sub else {}
         pings = sub.get("pings", {}) if sub else {}
+        speeds = sub.get("speeds", {}) if sub else {}
 
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(self.servers))
@@ -1474,6 +1536,18 @@ class ServerListDialog(QDialog):
             ping_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(i, 3, ping_item)
 
+            cached_bps = speeds.get(key)
+            if cached_bps is not None and cached_bps > 0:
+                sp_str = builder.fmt_speed(cached_bps)
+                speed_item = _SpeedItem(sp_str)
+                speed_item.setForeground(QBrush(QColor(_speed_color(cached_bps))))
+                speed_item.setData(Qt.ItemDataRole.UserRole + 1, cached_bps)
+            else:
+                speed_item = _SpeedItem("—")
+                speed_item.setData(Qt.ItemDataRole.UserRole + 1, -1)
+            speed_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(i, 4, speed_item)
+
             state = states.get(key, "unused")
             if is_cust:
                 state_text = "★ Свой"
@@ -1491,12 +1565,12 @@ class ServerListDialog(QDialog):
                 state_item.setForeground(QBrush(QColor("#FF3B30")))
             elif is_cust:
                 state_item.setForeground(QBrush(QColor("#34C759")))
-            self.table.setItem(i, 4, state_item)
+            self.table.setItem(i, 5, state_item)
 
             proto = (srv.get("protocol") or "—").upper()
             proto_item = QTableWidgetItem(proto)
             proto_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(i, 5, proto_item)
+            self.table.setItem(i, 6, proto_item)
 
         self._apply_filter()
 
@@ -1574,6 +1648,7 @@ class ServerListDialog(QDialog):
         act_unused = menu.addAction("○ Обычный")
         menu.addSeparator()
         act_ping = menu.addAction("Пинг")
+        act_speed = menu.addAction("⚡ Замерить скорость")
         act_connect = menu.addAction("Подключиться")
         act_delete = None
         if any(self._is_custom(i) for i in self._selected_indices()):
@@ -1588,6 +1663,8 @@ class ServerListDialog(QDialog):
             self.set_state("unused")
         elif act is act_ping:
             self.ping_selected()
+        elif act is act_speed:
+            self.speed_selected()
         elif act is act_connect:
             self.connect_selected()
         elif act_delete is not None and act is act_delete:
@@ -1633,6 +1710,58 @@ class ServerListDialog(QDialog):
             self.ping_finished.emit()
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def speed_selected(self):
+        indices = self._selected_indices()
+        if not indices:
+            indices = [self._row_to_server(r) for r in range(self.table.rowCount()) if not self.table.isRowHidden(r)]
+        if not indices:
+            QMessageBox.information(self, "Выбор", "Нет серверов для проверки скорости.")
+            return
+
+        self.btn_speed.setEnabled(False)
+        self.btn_speed.setText("Замер...")
+        sub = self.parent_app._active_subscription()
+
+        def worker():
+            for idx in indices:
+                srv = self.servers[idx]
+                key = builder.server_key(srv)
+                try:
+                    builder.generate_final_config(srv, use_zapret=False, block_quic=True)
+                    proc = appcore.start_xray_process(WORK_DIR)
+                    time.sleep(0.3)
+                    speed_bps, sp_str = builder.measure_server_speed(10808, timeout=2.5)
+                    appcore.stop_xray_process(proc)
+                    if sub:
+                        sub.setdefault("speeds", {})[key] = speed_bps
+                    self.speed_update.emit(idx, speed_bps, sp_str)
+                except Exception:
+                    if sub:
+                        sub.setdefault("speeds", {})[key] = 0.0
+                    self.speed_update.emit(idx, 0.0, "FAIL")
+
+            self.speed_finished.emit()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_speed_update(self, row_idx, speed_bps, text):
+        for row in range(self.table.rowCount()):
+            if self._row_to_server(row) == row_idx:
+                speed_item = _SpeedItem(text)
+                speed_item.setData(Qt.ItemDataRole.UserRole + 1, speed_bps)
+                if speed_bps > 0:
+                    speed_item.setForeground(QBrush(QColor(_speed_color(speed_bps))))
+                else:
+                    speed_item.setForeground(QBrush(QColor("#FF3B30")))
+                speed_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(row, 4, speed_item)
+
+    def _on_speed_finished(self):
+        self.btn_speed.setEnabled(True)
+        self.btn_speed.setText("⚡ Скорость")
+        self.parent_app.save_settings()
+        self.table.setSortingEnabled(True)
 
     def _on_ping_update(self, row_idx, text):
         for row in range(self.table.rowCount()):

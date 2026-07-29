@@ -497,6 +497,24 @@ class TestCustomServers(unittest.TestCase):
         app2.load_settings()
         self.assertEqual(app2.custom_links, [SAMPLE_VLESS])
 
+    def test_fmt_speed_formatting(self):
+        self.assertEqual(builder.fmt_speed(0), "FAIL")
+        self.assertEqual(builder.fmt_speed(-10), "FAIL")
+        self.assertEqual(builder.fmt_speed(512 * 1024), "512 KB/s")
+        self.assertEqual(builder.fmt_speed(5 * 1024 * 1024), "5.0 MB/s")
+
+    def test_combined_subscriptions_mode(self):
+        app = self._make_app()
+        app.subscriptions = [
+            {"name": "Sub 1", "url": "http://sub1", "active": True, "states": {}},
+            {"name": "Sub 2", "url": "http://sub2", "active": False, "states": {}},
+        ]
+        app.active_subscription_index = -1
+        sub = app._active_subscription()
+        self.assertIsNotNone(sub)
+        self.assertTrue(sub.get("is_combined"))
+        self.assertEqual(sub.get("name"), "★ Все подписки (Объединённый список)")
+
 
 class TestTrafficStats(unittest.TestCase):
     @classmethod

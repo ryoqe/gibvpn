@@ -1458,6 +1458,23 @@ class GibVPNApp(QMainWindow):
     def _active_subscription(self):
         if not self.subscriptions:
             return None
+        if self.active_subscription_index == -1:
+            merged_states = {}
+            merged_pings = {}
+            merged_speeds = {}
+            for sub in self.subscriptions:
+                merged_states.update(sub.get("states", {}))
+                merged_pings.update(sub.get("pings", {}))
+                merged_speeds.update(sub.get("speeds", {}))
+            return {
+                "name": "★ Все подписки (Объединённый список)",
+                "url": "",
+                "active": True,
+                "states": merged_states,
+                "pings": merged_pings,
+                "speeds": merged_speeds,
+                "is_combined": True
+            }
         if 0 <= self.active_subscription_index < len(self.subscriptions):
             return self.subscriptions[self.active_subscription_index]
         self.active_subscription_index = 0
@@ -1475,6 +1492,15 @@ class GibVPNApp(QMainWindow):
         return sub.get("states", {}).get(server_key, "unused")
 
     def _set_server_state(self, sub, server_key, state):
+        if self.active_subscription_index == -1:
+            for s in self.subscriptions:
+                states = s.setdefault("states", {})
+                if state == "unused":
+                    states.pop(server_key, None)
+                else:
+                    states[server_key] = state
+            return
+
         if not sub:
             return
         states = sub.setdefault("states", {})
@@ -1573,7 +1599,12 @@ class GibVPNApp(QMainWindow):
         sub = self._active_subscription()
         custom = self._get_custom_servers()
         servers = []
-        if sub is not None:
+        if self.active_subscription_index == -1:
+            for s in self.subscriptions:
+                sub_file = self._subscription_file(s)
+                if os.path.exists(sub_file):
+                    servers.extend(self._load_servers_for_subscription(s))
+        elif sub is not None:
             sub_file = self._subscription_file(sub)
             if os.path.exists(sub_file):
                 servers = self._load_servers_for_subscription(sub)
@@ -1582,6 +1613,7 @@ class GibVPNApp(QMainWindow):
             self.set_status("Error: No valid servers found", "red")
             self.log("ERROR: No valid servers parsed!")
             return None, sub
+        return servers, sub
         return servers, sub
 
     def _active_subscription_info(self):
