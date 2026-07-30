@@ -499,17 +499,13 @@ class SettingsDialog(QDialog):
         self.chk_autostart.stateChanged.connect(self.apply_autostart)
         form_misc.addRow(self.chk_autostart)
 
-        self.chk_system_proxy = QCheckBox("Включать системный прокси Windows при подключении")
-        self.chk_system_proxy.setChecked(self.parent_app.use_system_proxy)
-        self.chk_system_proxy.setToolTip("Направляет приложения Windows через GibVPN. Для полного туннеля будет отдельный режим TUN.")
-        self.chk_system_proxy.stateChanged.connect(self.apply_system_proxy)
-        form_misc.addRow(self.chk_system_proxy)
-
-        self.chk_tun = QCheckBox("Полный VPN (TUN): направлять весь трафик через туннель")
-        self.chk_tun.setChecked(self.parent_app.use_tun)
-        self.chk_tun.setToolTip("Создаёт виртуальный адаптер. Требуются права администратора; системный прокси в этом режиме не используется.")
-        self.chk_tun.stateChanged.connect(self.apply_tun)
-        form_misc.addRow(self.chk_tun)
+        self.lbl_connection_mode = QLabel(
+            "Режим «Прокси / Полный VPN» выбирается одним переключателем "
+            "на главном экране. Одновременно включить оба режима нельзя."
+        )
+        self.lbl_connection_mode.setWordWrap(True)
+        self.lbl_connection_mode.setStyleSheet("color: #475569;")
+        form_misc.addRow("Подключение:", self.lbl_connection_mode)
 
         self.btn_import_warp = QPushButton("Импортировать личный WARP-профиль")
         self.btn_import_warp.setToolTip("Выберите wgcf-profile.conf. Ключ останется только на этом компьютере.")
@@ -733,24 +729,6 @@ class SettingsDialog(QDialog):
         if self.parent_app.set_autostart(enabled):
             self.parent_app.autostart_enabled = enabled
             self.parent_app.save_settings()
-
-    def apply_system_proxy(self, state):
-        self.parent_app.use_system_proxy = (state == Qt.CheckState.Checked.value)
-        self.parent_app.save_settings()
-        self.parent_app.log(
-            "Системный прокси будет включаться при следующем подключении"
-            if self.parent_app.use_system_proxy else
-            "Системный прокси отключён для следующих подключений"
-        )
-
-    def apply_tun(self, state):
-        self.parent_app.use_tun = (state == Qt.CheckState.Checked.value)
-        self.parent_app.save_settings()
-        self.parent_app.log(
-            "Полный VPN (TUN) будет включён при следующем подключении"
-            if self.parent_app.use_tun else
-            "Полный VPN (TUN) отключён"
-        )
 
     def import_warp_profile(self):
         source, _ = QFileDialog.getOpenFileName(self, "Выберите wgcf-profile.conf", "", "WireGuard profile (*.conf);;Все файлы (*)")

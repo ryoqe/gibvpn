@@ -156,6 +156,36 @@ def is_windows_admin():
         return False
 
 
+def restart_as_windows_admin():
+    """Launch this application through UAC and return whether it was accepted.
+
+    The current process is deliberately not terminated here.  The GUI closes
+    itself only after ShellExecute reports a successful launch, so cancelling
+    the UAC prompt cannot make the application disappear.
+    """
+    if os.name != "nt":
+        return False
+
+    import ctypes
+    import subprocess
+
+    executable = sys.executable
+    if getattr(sys, "frozen", False):
+        arguments = list(sys.argv[1:])
+    else:
+        arguments = [os.path.abspath(sys.argv[0]), *sys.argv[1:]]
+
+    result = ctypes.windll.shell32.ShellExecuteW(
+        None,
+        "runas",
+        executable,
+        subprocess.list2cmdline(arguments),
+        os.getcwd(),
+        1,
+    )
+    return int(result) > 32
+
+
 def find_conflicting_vpn_adapters():
     """Return active third-party VPN adapters that currently own full routes.
 
@@ -936,7 +966,7 @@ def emergency_fix_internet():
     return True, log_lines
 
 
-CURRENT_APP_VERSION = "3.0.7"
+CURRENT_APP_VERSION = "3.0.8"
 
 
 def is_newer_version(candidate, current):

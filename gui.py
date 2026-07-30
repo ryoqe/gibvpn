@@ -90,6 +90,7 @@ class GibVPNApp(QMainWindow):
         self.active_subscription_index = 0
         self.autostart_enabled = False
         self.auto_reconnect = False
+        self.connection_mode = "proxy"
         self.use_system_proxy = True
         self.use_tun = False
         self._system_proxy_snapshot = None
@@ -365,6 +366,48 @@ class GibVPNApp(QMainWindow):
         self.btn_toggle.setStyleSheet(self._pill_btn_style("#42A5F5"))
         self.btn_toggle.setToolTip("Запустить/остановить VPN")
         self.btn_toggle.clicked.connect(self.toggle_vpn)
+
+        self.connection_mode_panel = QFrame(self.central)
+        self.connection_mode_panel.setObjectName("connection_mode_panel")
+        self.connection_mode_panel.setStyleSheet("""
+            QFrame#connection_mode_panel {
+                background-color: rgba(15, 23, 42, 175);
+                border: 1px solid rgba(255, 255, 255, 55);
+                border-radius: 14px;
+            }
+            QLabel {
+                color: #E2E8F0;
+                font-size: 11px;
+                font-weight: bold;
+            }
+        """)
+        connection_layout = QHBoxLayout(self.connection_mode_panel)
+        connection_layout.setContentsMargins(8, 5, 8, 5)
+        connection_layout.setSpacing(5)
+        self.connection_mode_label = QLabel("ПОДКЛЮЧЕНИЕ")
+        connection_layout.addWidget(self.connection_mode_label)
+
+        self.btn_proxy_mode = QPushButton("ПРОКСИ")
+        self.btn_proxy_mode.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_proxy_mode.setToolTip(
+            "Системный прокси: быстрее, но работает только в приложениях с поддержкой прокси"
+        )
+        self.btn_proxy_mode.clicked.connect(
+            lambda: self.set_connection_mode("proxy")
+        )
+        connection_layout.addWidget(self.btn_proxy_mode, 1)
+
+        self.btn_tun_mode = QPushButton("ПОЛНЫЙ VPN")
+        self.btn_tun_mode.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_tun_mode.setToolTip(
+            "TUN: направляет весь трафик Windows через VPN и требует права администратора"
+        )
+        self.btn_tun_mode.clicked.connect(
+            lambda: self.set_connection_mode("tun")
+        )
+        connection_layout.addWidget(self.btn_tun_mode, 1)
+        self._update_connection_mode_buttons()
+
         mode_btn_size = 72
         small_btn_h = 44
         group_gap = 25
@@ -552,6 +595,96 @@ class GibVPNApp(QMainWindow):
         self.btn_speed.setStyleSheet(self._round_btn_style(selected=(self.current_mode == "speed")))
         self.btn_auto.setStyleSheet(self._round_btn_style(selected=(self.current_mode == "auto")))
 
+    @staticmethod
+    def _connection_mode_button_style(selected):
+        if selected:
+            return """
+                QPushButton {
+                    background-color: #38BDF8;
+                    color: #082F49;
+                    border: none;
+                    border-radius: 9px;
+                    padding: 6px 10px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background-color: #7DD3FC; }
+                QPushButton:disabled { background-color: #64748B; color: #E2E8F0; }
+            """
+        return """
+            QPushButton {
+                background-color: rgba(255, 255, 255, 22);
+                color: #CBD5E1;
+                border: 1px solid rgba(255, 255, 255, 35);
+                border-radius: 9px;
+                padding: 6px 10px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: rgba(255, 255, 255, 50); color: white; }
+            QPushButton:disabled { color: #94A3B8; }
+        """
+
+    def _update_connection_mode_buttons(self):
+        if not hasattr(self, "btn_proxy_mode"):
+            return
+        is_tun = self.connection_mode == "tun"
+        self.btn_proxy_mode.setStyleSheet(
+            self._connection_mode_button_style(not is_tun)
+        )
+        self.btn_tun_mode.setStyleSheet(
+            self._connection_mode_button_style(is_tun)
+        )
+
+    def _apply_connection_mode(self, mode):
+        """Keep the legacy flags normalized for old backups/builds."""
+        self.connection_mode = "tun" if mode == "tun" else "proxy"
+        self.use_tun = self.connection_mode == "tun"
+        self.use_system_proxy = self.connection_mode == "proxy"
+        self._update_connection_mode_buttons()
+
+    def _restart_for_tun_admin(self):
+        self.save_settings()
+        self.set_status("ЗАПРОС ПРАВ АДМИНИСТРАТОРА...", "orange")
+        self.log("[TUN] Перезапуск GibVPN с правами администратора")
+        QApplication.processEvents()
+        if appcore.restart_as_windows_admin():
+            self._force_quit = True
+            QTimer.singleShot(0, self.close)
+            return True
+
+        self.set_status("TUN НЕ ЗАПУЩЕН", "red")
+        QMessageBox.warning(
+            self,
+            "Нужны права администратора",
+            "Windows не разрешила перезапуск с правами администратора. "
+            "Полный VPN не запускался, настройки Интернета не изменялись.",
+        )
+        return False
+
+    def set_connection_mode(self, mode):
+        mode = "tun" if mode == "tun" else "proxy"
+        if mode == self.connection_mode:
+            self._update_connection_mode_buttons()
+            return
+
+        was_running = self.is_running
+        if was_running:
+            self.stop_vpn()
+
+        self._apply_connection_mode(mode)
+        self.save_settings()
+        self.log(
+            "[UI] Режим подключения: полный VPN (TUN)"
+            if mode == "tun"
+            else "[UI] Режим подключения: системный прокси"
+        )
+
+        if mode == "tun" and not appcore.is_windows_admin():
+            self._restart_for_tun_admin()
+        elif was_running:
+            QTimer.singleShot(200, self._start_current_mode)
+
     def _start_current_mode(self):
         if self.current_mode == "max":
             self._run_vpn_worker(self.smart_start_max_availability)
@@ -600,14 +733,25 @@ class GibVPNApp(QMainWindow):
 
     def _run_vpn_worker(self, fn):
         self.set_toggle("СТОП", "#1F4E79", "#2A6299", False)
+        self.btn_proxy_mode.setEnabled(False)
+        self.btn_tun_mode.setEnabled(False)
         self._worker = Worker(fn)
         self._worker.error.connect(lambda e: (self.log(f"CRITICAL ERROR: {e}"),
                                               self.set_status(f"Error: {e}", "red"),
                                               self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)))
+        self._worker.finished.connect(
+            lambda: (
+                self.btn_proxy_mode.setEnabled(True),
+                self.btn_tun_mode.setEnabled(True),
+            )
+        )
         self._worker.start()
 
     def toggle_vpn(self):
         if not self.is_running:
+            if self.connection_mode == "tun" and not appcore.is_windows_admin():
+                self._restart_for_tun_admin()
+                return
             self.log("[UI] Запуск VPN...")
             self.set_toggle("ЗАПУСК...", "#FFA000", "#FFB300", False)
             self._start_current_mode()
@@ -1388,7 +1532,8 @@ class GibVPNApp(QMainWindow):
             self.show_dialog_signal.emit(
                 "warning", "Нужны права администратора",
                 "Полный VPN (TUN) создаёт виртуальный сетевой адаптер. "
-                "Перезапустите GibVPN от имени администратора и подключитесь снова."
+                "Вернитесь на главный экран и выберите «Полный VPN»: "
+                "GibVPN сам запросит права администратора."
             )
             return
         if self.use_tun:
@@ -1434,7 +1579,11 @@ class GibVPNApp(QMainWindow):
             self._reap_xray(self.xray_process)
             self.xray_process = None
             raise RuntimeError("Xray запустился, но локальный VPN-порт 10808 не открылся")
-        if self.use_tun:
+        if self.connection_mode == "tun":
+            # Defensive cleanup for settings created by builds where proxy and
+            # TUN could accidentally be active at the same time.
+            if appcore.recover_windows_system_proxy():
+                self.log("[SYSTEM] Перед запуском TUN отключён старый прокси GibVPN")
             try:
                 self.tun_process = self._spawn_tun()
                 self.log("[TUN] Полный VPN включён: весь TCP/UDP и DNS идут через VPN")
@@ -1442,7 +1591,7 @@ class GibVPNApp(QMainWindow):
                 self._reap_xray(self.xray_process)
                 self.xray_process = None
                 raise
-        elif self.use_system_proxy:
+        else:
             try:
                 self._system_proxy_snapshot = appcore.enable_windows_system_proxy()
                 appcore.save_windows_system_proxy_backup(self._system_proxy_snapshot)
@@ -1702,6 +1851,7 @@ class GibVPNApp(QMainWindow):
         toggle_w = min(320, max(220, w - log_w - link_w - 60))
         toggle_h = 38
         bottom_panel_h = 84
+        connection_mode_w = min(390, max(330, toggle_w))
 
         logs_left = w - margin - log_w
         self.logs_panel.setGeometry(logs_left, margin, log_w, h - 2 * margin - status_frame_h - 10)
@@ -1716,6 +1866,12 @@ class GibVPNApp(QMainWindow):
 
         toggle_x = (margin + link_w + logs_left - toggle_w) // 2
         self.btn_toggle.setGeometry(toggle_x, margin + 4, toggle_w, toggle_h)
+        self.connection_mode_panel.setGeometry(
+            toggle_x,
+            margin + toggle_h + 12,
+            connection_mode_w,
+            44,
+        )
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -2121,8 +2277,19 @@ class GibVPNApp(QMainWindow):
                 self.current_mode = data.get("current_mode", "min")
                 self.sub_auto_update_hours = data.get("sub_auto_update_hours", 24)
                 self.block_quic = data.get("block_quic", True)
-                self.use_system_proxy = data.get("use_system_proxy", True)
-                self.use_tun = data.get("use_tun", False)
+                stored_connection_mode = data.get("connection_mode")
+                if stored_connection_mode not in ("proxy", "tun"):
+                    # Old builds stored two unrelated booleans.  TUN wins when
+                    # both were checked because it is the explicit full-VPN
+                    # request; either way the resulting state is exclusive.
+                    stored_connection_mode = (
+                        "tun" if data.get("use_tun", False) else "proxy"
+                    )
+                legacy_conflict = bool(
+                    data.get("use_tun", False)
+                    and data.get("use_system_proxy", False)
+                )
+                self._apply_connection_mode(stored_connection_mode)
 
                 self.use_zapret = data.get("use_zapret", False)
                 self.zapret_dir = data.get("zapret_dir", self.zapret_dir)
@@ -2161,6 +2328,9 @@ class GibVPNApp(QMainWindow):
                     self.active_subscription_index = data.get("active_subscription_index", 0)
 
                 self.log(f"Настройки успешно загружены из {self.settings_file}")
+                if legacy_conflict or data.get("connection_mode") != stored_connection_mode:
+                    self.save_settings()
+                    self.log("[SYSTEM] Старые настройки подключения приведены к одному режиму")
             except Exception as e:
                 log_exception("load_settings failed")
                 self.log(f"Ошибка загрузки настроек: {e}")
@@ -2178,8 +2348,9 @@ class GibVPNApp(QMainWindow):
             "autostart_enabled": self.autostart_enabled,
             "sub_auto_update_hours": self.sub_auto_update_hours,
             "block_quic": self.block_quic,
-            "use_system_proxy": self.use_system_proxy,
-            "use_tun": self.use_tun,
+            "connection_mode": self.connection_mode,
+            "use_system_proxy": self.connection_mode == "proxy",
+            "use_tun": self.connection_mode == "tun",
             "use_zapret": getattr(self, "use_zapret", False),
             "zapret_dir": getattr(self, "zapret_dir", ""),
             "zapret_preset": getattr(self, "zapret_preset", "general.bat"),
@@ -2237,6 +2408,7 @@ class GibVPNApp(QMainWindow):
                 "autostart_enabled": self.autostart_enabled,
                 "sub_auto_update_hours": self.sub_auto_update_hours,
                 "block_quic": self.block_quic,
+                "connection_mode": self.connection_mode,
                 "use_zapret": getattr(self, "use_zapret", False),
                 "zapret_dir": getattr(self, "zapret_dir", ""),
                 "zapret_preset": getattr(self, "zapret_preset", "general.bat"),
@@ -2276,6 +2448,12 @@ class GibVPNApp(QMainWindow):
             self.autostart_enabled = st.get("autostart_enabled", self.autostart_enabled)
             self.sub_auto_update_hours = st.get("sub_auto_update_hours", self.sub_auto_update_hours)
             self.block_quic = st.get("block_quic", self.block_quic)
+            backup_connection_mode = st.get("connection_mode")
+            if backup_connection_mode not in ("proxy", "tun"):
+                backup_connection_mode = (
+                    "tun" if st.get("use_tun", False) else self.connection_mode
+                )
+            self._apply_connection_mode(backup_connection_mode)
             self.use_zapret = st.get("use_zapret", getattr(self, "use_zapret", False))
             self.zapret_dir = st.get("zapret_dir", getattr(self, "zapret_dir", ""))
             self.zapret_preset = st.get("zapret_preset", getattr(self, "zapret_preset", "general.bat"))
@@ -2342,7 +2520,9 @@ if __name__ == "__main__":
         app.setStyle("Fusion")
         app.setPalette(QPalette(QColor("#F2F2F7")))
         instance_lock = QLockFile(os.path.join(APP_DIR, "gibvpn.lock"))
-        if not instance_lock.tryLock(100):
+        # An elevated replacement can start a fraction earlier than the old
+        # process releases its lock.  Give that intentional hand-off time.
+        if not instance_lock.tryLock(10000):
             QMessageBox.warning(
                 None, "GibVPN",
                 "Приложение GibVPN уже запущено!"
