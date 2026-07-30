@@ -643,12 +643,13 @@ class GibVPNApp(QMainWindow):
         self.use_system_proxy = self.connection_mode == "proxy"
         self._update_connection_mode_buttons()
 
-    def _restart_for_tun_admin(self):
+    def _restart_for_tun_admin(self, start_vpn=False):
         self.save_settings()
         self.set_status("ЗАПРОС ПРАВ АДМИНИСТРАТОРА...", "orange")
         self.log("[TUN] Перезапуск GibVPN с правами администратора")
         QApplication.processEvents()
-        if appcore.restart_as_windows_admin():
+        extra_args = ["--start-vpn"] if start_vpn else None
+        if appcore.restart_as_windows_admin(extra_args=extra_args):
             self._force_quit = True
             QTimer.singleShot(0, self.close)
             return True
@@ -681,7 +682,7 @@ class GibVPNApp(QMainWindow):
         )
 
         if mode == "tun" and not appcore.is_windows_admin():
-            self._restart_for_tun_admin()
+            self._restart_for_tun_admin(start_vpn=was_running)
         elif was_running:
             QTimer.singleShot(200, self._start_current_mode)
 
@@ -750,7 +751,7 @@ class GibVPNApp(QMainWindow):
     def toggle_vpn(self):
         if not self.is_running:
             if self.connection_mode == "tun" and not appcore.is_windows_admin():
-                self._restart_for_tun_admin()
+                self._restart_for_tun_admin(start_vpn=True)
                 return
             self.log("[UI] Запуск VPN...")
             self.set_toggle("ЗАПУСК...", "#FFA000", "#FFB300", False)
@@ -2531,6 +2532,10 @@ if __name__ == "__main__":
 
         win = GibVPNApp()
         win.show()
+        if "--start-vpn" in sys.argv:
+            # Used by the proxy -> TUN hand-off: the elevated replacement
+            # resumes the connection after the old process released its lock.
+            QTimer.singleShot(750, win.toggle_vpn)
         sys.exit(app.exec())
     except Exception as e:
         log_exception("Uncaught exception in main window")

@@ -156,7 +156,7 @@ def is_windows_admin():
         return False
 
 
-def restart_as_windows_admin():
+def restart_as_windows_admin(extra_args=None):
     """Launch this application through UAC and return whether it was accepted.
 
     The current process is deliberately not terminated here.  The GUI closes
@@ -174,6 +174,9 @@ def restart_as_windows_admin():
         arguments = list(sys.argv[1:])
     else:
         arguments = [os.path.abspath(sys.argv[0]), *sys.argv[1:]]
+    for argument in extra_args or ():
+        if argument not in arguments:
+            arguments.append(argument)
 
     result = ctypes.windll.shell32.ShellExecuteW(
         None,
@@ -966,7 +969,7 @@ def emergency_fix_internet():
     return True, log_lines
 
 
-CURRENT_APP_VERSION = "3.0.8"
+CURRENT_APP_VERSION = "3.0.9"
 
 
 def is_newer_version(candidate, current):
