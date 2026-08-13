@@ -829,7 +829,6 @@ class PingSitesDialog(QDialog):
         self.parent_app.log(f"Сайты для пинга обновлены: {', '.join(new_sites.keys())}")
         self.accept()
 
-
 class SubscriptionEditDialog(QDialog):
     """Диалог добавления/редактирования подписки."""
 
@@ -1747,7 +1746,7 @@ class ServerListDialog(QDialog):
                     builder.generate_final_config(srv, use_zapret=False, block_quic=True)
                     proc = appcore.start_xray_process(WORK_DIR)
                     time.sleep(0.3)
-                    speed_bps, sp_str = builder.measure_server_speed(10808, timeout=2.5)
+                    speed_bps, sp_str = builder.measure_server_speed(10808)
                     appcore.stop_xray_process(proc)
                     if sub:
                         sub.setdefault("speeds", {})[key] = speed_bps

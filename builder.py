@@ -13,6 +13,7 @@ from appcore import WORK_DIR
 # Loopback port of the Xray API inbound (StatsService) in the final config.
 XRAY_API_PORT = 10085
 SINGBOX_TUN_CONFIG = "singbox_tun.json"
+TUN_MTU = 1500
 
 # ChatGPT uses more than one first-party hostname.  Keep this list in one
 # place so routing rules and diagnostics describe the same traffic class.
@@ -990,6 +991,9 @@ def generate_tun_config():
                 "type": "https",
                 "server": "1.1.1.1",
                 "path": "/dns-query",
+                # The IP avoids a bootstrap DNS request while the explicit
+                # SNI makes the TLS certificate check deterministic.
+                "tls": {"server_name": "cloudflare-dns.com"},
                 "detour": "xray-out",
             }],
             "final": "remote-dns",
@@ -1002,7 +1006,10 @@ def generate_tun_config():
             # elevated process. IPv4 TUN is sufficient for desktop apps and
             # avoids aborting the entire VPN on those systems.
             "address": ["172.19.0.1/30"],
-            "mtu": 1400,
+            # Keep the virtual adapter at the normal Ethernet MTU.  9000 is
+            # only fast on a completely jumbo-capable path; through a remote
+            # SOCKS/Xray hop it causes fragmentation and slow ChatGPT/media.
+            "mtu": TUN_MTU,
             "auto_route": True,
             "strict_route": True,
             "stack": "system",
@@ -1043,7 +1050,7 @@ def generate_tun_config():
     return config_path
 
 
-def measure_server_speed(port, timeout=2.5):
+def measure_server_speed(port, timeout=8.0):
     """
     Measure download speed (in bytes/sec) through local SOCKS proxy on given port.
     Returns (bytes_per_sec: float, formatted_str: str).
@@ -1056,10 +1063,12 @@ def measure_server_speed(port, timeout=2.5):
         "https": f"socks5h://127.0.0.1:{port}"
     }
 
+    # Do not fall back to 204 endpoints: they return no payload and used to
+    # make working servers appear as 0 B/s. Eight MiB is enough to avoid a
+    # TCP slow-start result while keeping a server selection quick.
     test_urls = [
-        "https://speed.cloudflare.com/__down?bytes=1000000",
-        "https://www.google.com/generate_204",
-        "http://cp.cloudflare.com/generate_204"
+        "https://speed.cloudflare.com/__down?bytes=8388608",
+        "https://speed.hetzner.de/10MB.bin",
     ]
 
     s = requests.Session()
@@ -1068,16 +1077,18 @@ def measure_server_speed(port, timeout=2.5):
     for url in test_urls:
         try:
             start_time = time.time()
-            r = s.get(url, proxies=proxies, timeout=(1.5, timeout), stream=True)
+            r = s.get(url, proxies=proxies, timeout=(4.0, timeout), stream=True)
             if r.status_code in (200, 204):
                 received = 0
                 for chunk in r.iter_content(chunk_size=8192):
-                    received += len(chunk)
-                    if time.time() - start_time >= timeout:
+                    if chunk:
+                        received += len(chunk)
+                    if received >= 8 * 1024 * 1024 or time.time() - start_time >= timeout:
                         break
                 elapsed = max(0.001, time.time() - start_time)
-                speed_bps = received / elapsed
-                return speed_bps, fmt_speed(speed_bps)
+                if received >= 128 * 1024:
+                    speed_bps = received / elapsed
+                    return speed_bps, fmt_speed(speed_bps)
         except Exception:
             continue
 

@@ -34,6 +34,33 @@ from dialogs import (
 )
 
 
+# These endpoints are deliberately small, stable and geographically diverse.
+# They are availability probes, not a speed test and not a subscription test.
+DEFAULT_CHECK_SITES = {
+    "Cloudflare": "https://cp.cloudflare.com/generate_204",
+    "Google": "https://www.google.com/generate_204",
+    "Yandex": "https://ya.ru",
+    "Telegram": "https://telegram.org",
+    "Microsoft": "https://www.msftconnecttest.com/connecttest.txt",
+}
+
+
+def normalize_check_sites(value):
+    """Keep a useful, valid availability list and repair the old test stub."""
+    if not isinstance(value, dict):
+        return dict(DEFAULT_CHECK_SITES), True
+    cleaned = {
+        str(name).strip(): str(url).strip()
+        for name, url in value.items()
+        if str(name).strip() and str(url).strip().startswith(("https://", "http://"))
+    }
+    # A former test build accidentally persisted this single placeholder into
+    # real user settings. It must never be used to select a VPN server.
+    if cleaned == {"Test": "https://example.com"} or not cleaned:
+        return dict(DEFAULT_CHECK_SITES), True
+    return cleaned, cleaned != value
+
+
 class GibVPNApp(QMainWindow):
     log_signal = pyqtSignal(str)
     status_signal = pyqtSignal(str, str)
@@ -70,13 +97,7 @@ class GibVPNApp(QMainWindow):
         self._test_port_offset = 0
         self.custom_links = []
 
-        self.check_sites = {
-            "Google": "http://www.google.com/generate_204",
-            "Cloudflare": "http://cp.cloudflare.com/generate_204",
-            "GStatic": "http://connectivitycheck.gstatic.com/generate_204",
-            "Telegram": "https://t.me",
-            "Yandex": "http://ya.ru"
-        }
+        self.check_sites = dict(DEFAULT_CHECK_SITES)
         self.gpt_check_urls = {
             "ChatGPT": "https://chatgpt.com/api/auth/session",
             "OpenAI auth": "https://auth.openai.com/",
@@ -1242,7 +1263,7 @@ class GibVPNApp(QMainWindow):
                 builder.generate_final_config(srv, use_zapret=False, block_quic=True)
                 proc = self._spawn_xray(is_test=True)
                 time.sleep(0.3)
-                speed_bps, sp_str = builder.measure_server_speed(10808, timeout=2.0)
+                speed_bps, sp_str = builder.measure_server_speed(10808)
                 self._reap_xray(proc)
                 key = builder.server_key(srv)
                 self.log(f"[SPEED] Server #{orig_i} ({key}): {sp_str}")
@@ -1329,7 +1350,7 @@ class GibVPNApp(QMainWindow):
                 builder.generate_final_config(srv, use_zapret=False, block_quic=True)
                 proc = self._spawn_xray(is_test=True)
                 time.sleep(0.3)
-                speed_bps, sp_str = builder.measure_server_speed(10808, timeout=2.0)
+                speed_bps, sp_str = builder.measure_server_speed(10808)
                 self._reap_xray(proc)
             except Exception:
                 pass
@@ -2319,9 +2340,9 @@ class GibVPNApp(QMainWindow):
 
                 self.custom_links = data.get("custom_links", [])
 
-                sites = data.get("check_sites")
-                if sites and isinstance(sites, dict):
-                    self.check_sites = sites
+                self.check_sites, repaired_sites = normalize_check_sites(
+                    data.get("check_sites", self.check_sites)
+                )
 
                 subs = data.get("subscriptions", [])
                 if subs:
@@ -2329,9 +2350,13 @@ class GibVPNApp(QMainWindow):
                     self.active_subscription_index = data.get("active_subscription_index", 0)
 
                 self.log(f"Настройки успешно загружены из {self.settings_file}")
-                if legacy_conflict or data.get("connection_mode") != stored_connection_mode:
+                if (legacy_conflict or repaired_sites or
+                        data.get("connection_mode") != stored_connection_mode):
                     self.save_settings()
-                    self.log("[SYSTEM] Старые настройки подключения приведены к одному режиму")
+                    if repaired_sites:
+                        self.log("[SYSTEM] Восстановлен стандартный список сайтов для проверки")
+                    if legacy_conflict or data.get("connection_mode") != stored_connection_mode:
+                        self.log("[SYSTEM] Старые настройки подключения приведены к одному режиму")
             except Exception as e:
                 log_exception("load_settings failed")
                 self.log(f"Ошибка загрузки настроек: {e}")
@@ -2474,9 +2499,9 @@ class GibVPNApp(QMainWindow):
             self.top_offset_x = st.get("top_offset_x", self.top_offset_x)
             self.top_offset_y = st.get("top_offset_y", self.top_offset_y)
 
-            sites = st.get("check_sites")
-            if sites and isinstance(sites, dict):
-                self.check_sites = sites
+            self.check_sites, _ = normalize_check_sites(
+                st.get("check_sites", self.check_sites)
+            )
 
             self.custom_links = st.get("custom_links", self.custom_links)
 
