@@ -866,6 +866,9 @@ def generate_final_config(
         "domain:antigravity-unleash.goog",
         "domain:googleapis.com",
         "domain:google.com",
+        # NotebookLM and newer Google AI services use the .google top-level
+        # domain (for example notebooklm.google), not .google.com.
+        "domain:google",
         *GPT_DOMAINS,
     ]
     wd_file = _find_file_path('warp_domains.txt')
