@@ -37,6 +37,15 @@ GPT_DOMAINS = [
     "full:humb.apple.com",
 ]
 
+# These requests judge whether the selected VPN server itself is alive.  They
+# must never go through optional WARP, otherwise a temporary Cloudflare/WARP
+# failure incorrectly tears down a healthy base Xray connection.
+BASE_HEALTH_DOMAINS = [
+    "full:cp.cloudflare.com",
+    "full:www.google.com",
+    "full:connectivitycheck.gstatic.com",
+]
+
 
 def _bytes_to_text(raw):
     """Decode bytes to text, tolerating UTF-8 and UTF-16 (BOM or not).
@@ -833,7 +842,6 @@ def generate_final_config(
     warp_domains = [
         "geosite:google-gemini",
         "geosite:openai",
-        "geosite:google",
         "domain:ai.com",
         "domain:gemini.com",
         "domain:gemini.google.com",
@@ -850,10 +858,7 @@ def generate_final_config(
         "domain:proactivebackend-pa.googleapis.com",
         "domain:robinfrontend-pa.googleapis.com",
         "domain:kimi.com",
-        "domain:goog",
         "domain:antigravity-unleash.goog",
-        "domain:googleapis.com",
-        "domain:google.com",
         *GPT_DOMAINS,
     ]
     wd_file = _find_file_path('warp_domains.txt')
@@ -895,6 +900,13 @@ def generate_final_config(
             "domain": direct_domains
         }
     ]
+
+    rules.append({
+        "type": "field",
+        "inboundTag": ["socks-in", "http-in"],
+        "outboundTag": "best-proxy",
+        "domain": BASE_HEALTH_DOMAINS,
+    })
 
     if direct_apps:
         rules.append({

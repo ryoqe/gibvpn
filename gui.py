@@ -1784,7 +1784,7 @@ class GibVPNApp(QMainWindow):
                 s = requests.Session()
                 s.trust_env = False
                 res = s.get(
-                    "https://www.google.com/generate_204",
+                    "https://cp.cloudflare.com/generate_204",
                     proxies=self.proxy_dict,
                     timeout=(2.0, 4.0)
                 )
