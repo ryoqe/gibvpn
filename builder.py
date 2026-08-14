@@ -1252,12 +1252,19 @@ def generate_tun_config(route_exclude_addresses=None):
                 },
                 {
                     # Model backends add and rotate hosts, so domain lists are
-                    # not enough. Bind all known Antigravity components.
+                    # not enough.  The desktop app starts helper/node
+                    # processes with changing names, therefore matching only
+                    # the launcher names leaks part of its traffic to the
+                    # ordinary tunnel.  Match the installed app directory as
+                    # well: every Antigravity child keeps the same WARP exit.
                     "process_name": [
                         "Antigravity.exe",
                         "language_server.exe",
                         "agy.exe",
                         "agy-node.exe",
+                    ],
+                    "process_path_regex": [
+                        r"(?i).*\\antigravity\\.*",
                     ],
                     "action": "route",
                     "outbound": "xray-warp-out",
