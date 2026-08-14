@@ -33,7 +33,7 @@ def get_app_dir():
         base_src = os.path.dirname(os.path.abspath(__file__))
 
     # Seed initial user configuration files if not present in APPDATA
-    for item in ("app_settings.json", "direct_domains.txt", "direct_apps.txt", "warp_domains.txt", "assets", "singbox_bin"):
+    for item in ("app_settings.json", "direct_domains.txt", "direct_apps.txt", "vpn_apps.txt", "warp_domains.txt", "assets", "singbox_bin"):
         src = os.path.join(base_src, item)
         dst = os.path.join(app_data_dir, item)
         if not os.path.exists(src) and item == "app_settings.json":
@@ -110,7 +110,7 @@ def get_work_dir(app_dir):
             _copy_if_changed(src, dst)
 
         # User-editable rules are initial defaults, never overwrite them.
-        for name in ('direct_domains.txt', 'direct_apps.txt', 'warp_domains.txt'):
+        for name in ('direct_domains.txt', 'direct_apps.txt', 'vpn_apps.txt', 'warp_domains.txt'):
             src = os.path.join(meipass, name)
             dst = os.path.join(app_dir, name)
             if os.path.isfile(src) and not os.path.exists(dst):
@@ -1186,7 +1186,7 @@ def emergency_fix_internet():
     return True, log_lines
 
 
-CURRENT_APP_VERSION = "3.0.18"
+CURRENT_APP_VERSION = "3.0.19"
 
 
 def is_newer_version(candidate, current):

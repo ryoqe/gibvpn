@@ -705,6 +705,40 @@ def _find_file_path(filename):
     return filename
 
 
+def read_process_route_matchers(filename):
+    """Split an application route list into executable names and full paths."""
+    names = []
+    paths = []
+    path = _find_file_path(filename)
+    if not os.path.exists(path):
+        return {"process_name": names, "process_path": paths}
+
+    for raw_line in read_text_file(path):
+        value = raw_line.strip()
+        if not value or value.startswith(("#", ";")):
+            continue
+        value = os.path.expandvars(value.strip('"'))
+        target = paths if (os.path.isabs(value) or "\\" in value or "/" in value) else names
+        normalized = os.path.normpath(value) if target is paths else value
+        if normalized.casefold() not in {item.casefold() for item in target}:
+            target.append(normalized)
+    return {"process_name": names, "process_path": paths}
+
+
+def _process_route_rules(filename, outbound):
+    """Build separate sing-box rules because different fields are ANDed."""
+    matchers = read_process_route_matchers(filename)
+    rules = []
+    for field in ("process_name", "process_path"):
+        if matchers[field]:
+            rules.append({
+                field: matchers[field],
+                "action": "route",
+                "outbound": outbound,
+            })
+    return rules
+
+
 def get_warp_settings(profile_path=None):
     """Read a user-owned wgcf WireGuard profile; never use a shared key."""
     path = profile_path or _find_file_path("wgcf-profile.conf")
@@ -1072,6 +1106,8 @@ def generate_tun_config(route_exclude_addresses=None):
     Windows virtual adapter, hijacks DNS, and transparently sends TCP/UDP to
     the local SOCKS inbound.
     """
+    forced_vpn_rules = _process_route_rules("vpn_apps.txt", "xray-out")
+    direct_app_rules = _process_route_rules("direct_apps.txt", "direct")
     config = {
         "log": {"level": "warn"},
         "dns": {
@@ -1121,11 +1157,15 @@ def generate_tun_config(route_exclude_addresses=None):
             "auto_detect_interface": True,
             "rules": [
                 {
-                    # Windows sends adapter DNS to the TUN peer address. Port
-                    # matching is reliable even when protocol sniffing has not
-                    # classified the first UDP packet yet.
-                    "port": 53,
-                    "action": "hijack-dns",
+                    # Without this rule Xray's connection to the remote VPN
+                    # server is captured by the TUN and sent back to Xray,
+                    # creating a loop that cuts off all Internet access.
+                    "process_name": [
+                        "xray.exe",
+                        "sing-box.exe",
+                    ],
+                    "action": "route",
+                    "outbound": "direct",
                 },
                 {
                     # Model backends add and rotate hosts, so domain lists are
@@ -1139,16 +1179,13 @@ def generate_tun_config(route_exclude_addresses=None):
                     "action": "route",
                     "outbound": "xray-warp-out",
                 },
+                *forced_vpn_rules,
+                *direct_app_rules,
                 {
-                    # Without this rule Xray's connection to the remote VPN
-                    # server is captured by the TUN and sent back to Xray,
-                    # creating a loop that cuts off all Internet access.
-                    "process_name": [
-                        "xray.exe",
-                        "sing-box.exe",
-                    ],
-                    "action": "route",
-                    "outbound": "direct",
+                    # Keep this after application rules: an excluded program
+                    # that sends DNS itself must also bypass the VPN.
+                    "port": 53,
+                    "action": "hijack-dns",
                 },
                 {"action": "hijack-dns", "protocol": "dns"},
             ],

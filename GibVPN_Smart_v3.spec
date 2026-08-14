@@ -12,6 +12,7 @@ helper_files = [
     'geosite.dat',
     'direct_domains.txt',
     'direct_apps.txt',
+    'vpn_apps.txt',
     'warp_domains.txt',
     'ofont.ru_Zeequada.ttf',
 ]

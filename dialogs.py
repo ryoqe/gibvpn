@@ -83,9 +83,14 @@ class ConfigTextEditorDialog(QDialog):
             "hint": "Сайты, идущие напрямую в обход VPN (по одному в строке).\nПример: domain:ru, yandex.ru, ya.ru"
         },
         "#apps": {
-            "title": "Исключения (приложения)",
+            "title": "Обход VPN (приложения)",
             "file": "direct_apps.txt",
-            "hint": "Приложения Windows, идущие напрямую в обход VPN (по одному имени exe в строке).\nПример: telegram.exe, discord.exe, steam.exe"
+            "hint": "Приложения Windows, целиком идущие напрямую в режиме «Полный VPN».\nУкажите имя EXE или полный путь, по одному в строке. Пример: steam.exe, cs2.exe"
+        },
+        "#vpnapps": {
+            "title": "Всегда через VPN (приложения)",
+            "file": "vpn_apps.txt",
+            "hint": "Приложения Windows, которые обязательно идут через Xray в режиме «Полный VPN».\nУкажите имя EXE или полный путь, по одному в строке. Этот список имеет приоритет над обходом."
         },
         "#xray": {
             "title": "Конфигурация Xray (config.json)",
@@ -194,8 +199,17 @@ class ConfigTextEditorDialog(QDialog):
             with open(self.filepath, "w", encoding="utf-8") as f:
                 f.write(content)
             self.parent_app.log(f"Файл успешно сохранён: {self.filename}")
-            QMessageBox.information(self, "Успешно", f"Изменения в файле {self.filename} сохранены!")
+            reload_routes = (
+                self.target_key in {"#apps", "#vpnapps"}
+                and getattr(self.parent_app, "is_running", False)
+            )
+            message = f"Изменения в файле {self.filename} сохранены!"
+            if reload_routes:
+                message += "\n\nVPN сейчас переподключится и сразу применит правила EXE."
+            QMessageBox.information(self, "Успешно", message)
             self.accept()
+            if reload_routes:
+                QTimer.singleShot(0, self.parent_app.reload_application_routes)
         except Exception as e:
             QMessageBox.critical(self, "Ошибка сохранения", f"Не удалось сохранить {self.filename}:\n{e}")
 

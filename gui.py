@@ -140,6 +140,7 @@ class GibVPNApp(QMainWindow):
         self.warp_file = os.path.join(WORK_DIR, "warp_domains.txt")
         self.exc_file = os.path.join(WORK_DIR, "direct_domains.txt")
         self.apps_file = os.path.join(WORK_DIR, "direct_apps.txt")
+        self.vpn_apps_file = os.path.join(WORK_DIR, "vpn_apps.txt")
 
         self.central = QWidget(self)
         self.setCentralWidget(self.central)
@@ -265,10 +266,17 @@ class GibVPNApp(QMainWindow):
         self.exc_link.clicked.connect(lambda: self.open_text_file("#exc"))
         self.left_layout.addWidget(self.exc_link)
 
-        self.apps_link = QPushButton("📱 Исключения (приложения)", self.left_panel)
+        self.vpn_apps_link = QPushButton("🔒 Всегда через VPN (EXE)", self.left_panel)
+        self.vpn_apps_link.setStyleSheet(left_btn_style)
+        self.vpn_apps_link.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.vpn_apps_link.setToolTip("Приложения, которые TUN обязательно направляет в Xray")
+        self.vpn_apps_link.clicked.connect(lambda: self.open_text_file("#vpnapps"))
+        self.left_layout.addWidget(self.vpn_apps_link)
+
+        self.apps_link = QPushButton("↪ Обход VPN (EXE)", self.left_panel)
         self.apps_link.setStyleSheet(left_btn_style)
         self.apps_link.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.apps_link.setToolTip("Приложения Windows, идущие напрямую в обход VPN (direct_apps.txt)")
+        self.apps_link.setToolTip("Приложения Windows, которые TUN полностью направляет в обход VPN")
         self.apps_link.clicked.connect(lambda: self.open_text_file("#apps"))
         self.left_layout.addWidget(self.apps_link)
 
@@ -949,34 +957,12 @@ class GibVPNApp(QMainWindow):
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         appcore.attach_process_to_app_job(proc)
-        # Windows needs a moment to apply the new interface DNS and route
-        # metrics. Testing too early produces a false "no Internet" failure.
-        time.sleep(2.5)
+        # Only verify the local engine. External health sites are not a valid
+        # startup gate: a slow/blocked probe used to tear down a healthy VPN.
+        time.sleep(1.0)
         if proc.poll() is not None:
             error = (proc.stderr.read() or b"").decode("utf-8", errors="replace").strip()
             raise RuntimeError(error or "sing-box не смог создать TUN-адаптер")
-        healthy, details = appcore.verify_tun_connectivity()
-        if not healthy:
-            try:
-                proc.terminate()
-                proc.wait(timeout=3)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-            tun_error = ""
-            try:
-                tun_error = (proc.stderr.read() or b"").decode(
-                    "utf-8", errors="replace"
-                ).strip()
-            except Exception:
-                pass
-            raise RuntimeError(
-                "TUN создан, но проверка Интернета не прошла. "
-                f"Маршруты автоматически отменены: {details}"
-                + (f"; sing-box: {tun_error[-1000:]}" if tun_error else "")
-            )
         return proc
 
     def _watch_tun_process(self, proc):
@@ -1645,6 +1631,11 @@ class GibVPNApp(QMainWindow):
                 exclusions = [tun_server_address] if tun_server_address else []
                 self.tun_process = self._spawn_tun(exclusions)
                 self.log("[TUN] Полный VPN включён: весь TCP/UDP и DNS идут через VPN")
+                forced = builder.read_process_route_matchers("vpn_apps.txt")
+                bypass = builder.read_process_route_matchers("direct_apps.txt")
+                forced_count = sum(len(items) for items in forced.values())
+                bypass_count = sum(len(items) for items in bypass.values())
+                self.log(f"[TUN] Правила EXE: через Xray — {forced_count}, в обход — {bypass_count}")
             except Exception:
                 self._reap_xray(self.xray_process)
                 self.xray_process = None
@@ -2012,6 +2003,14 @@ class GibVPNApp(QMainWindow):
         dlg = ConfigTextEditorDialog(self, link)
         dlg.exec()
         self.log(f"Открыт встроенный редактор для {link}")
+
+    def reload_application_routes(self):
+        """Apply edited EXE route lists without requiring a manual restart."""
+        if not self.is_running:
+            return
+        self.log("[ROUTING] Применение новых правил EXE...")
+        self.stop_vpn()
+        QTimer.singleShot(200, self._start_current_mode)
 
 
 
@@ -2524,6 +2523,7 @@ class GibVPNApp(QMainWindow):
             "direct_domains": builder.read_text_file(self.exc_file),
             "warp_domains": builder.read_text_file(self.warp_file),
             "direct_apps": builder.read_text_file(getattr(self, "apps_file", os.path.join(WORK_DIR, "direct_apps.txt"))),
+            "vpn_apps": builder.read_text_file(getattr(self, "vpn_apps_file", os.path.join(WORK_DIR, "vpn_apps.txt"))),
         }
 
     def import_full_backup(self, data):
@@ -2596,6 +2596,15 @@ class GibVPNApp(QMainWindow):
                     f.write("".join(da) if any("\n" in x for x in da) else "\n".join(da) + "\n")
             except Exception as e:
                 log_exception("import direct_apps failed")
+
+        va = data.get("vpn_apps")
+        if isinstance(va, list):
+            try:
+                vpn_apps_path = getattr(self, "vpn_apps_file", os.path.join(WORK_DIR, "vpn_apps.txt"))
+                with open(vpn_apps_path, "w", encoding="utf-8") as f:
+                    f.write("".join(va) if any("\n" in x for x in va) else "\n".join(va) + "\n")
+            except Exception:
+                log_exception("import vpn_apps failed")
 
         self.save_settings()
         self.central.update()
