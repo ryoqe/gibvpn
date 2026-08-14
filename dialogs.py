@@ -217,11 +217,18 @@ class ConfigTextEditorDialog(QDialog):
 class UpdateDialog(QDialog):
     """Диалог проверки и установки обновлений приложения."""
 
+    check_finished = pyqtSignal(object)
+    update_prepared = pyqtSignal(str)
+    update_failed = pyqtSignal(str)
+
     def __init__(self, parent):
         super().__init__(parent, Qt.WindowType.Dialog)
         self.setWindowTitle("Обновление GibVPN")
         self.setFixedSize(480, 320)
         self.parent_app = parent
+        self.check_finished.connect(self._show_check_result)
+        self.update_prepared.connect(self._finish_update)
+        self.update_failed.connect(self._show_update_error)
         self.setFont(parent.font())
         self.setStyleSheet("""
             QDialog { background-color: #F2F2F7; }
@@ -272,20 +279,24 @@ class UpdateDialog(QDialog):
     def _check_updates(self):
         def worker():
             tag, url, notes, sha256, size = appcore.get_latest_github_app_info()
-            cur_ver = appcore.CURRENT_APP_VERSION
-            if tag and appcore.is_newer_version(tag, cur_ver):
-                self._update_data = (tag, url, notes, sha256, size)
-                self.lbl_status.setText(f"Доступно обновление: v{tag} (у вас v{cur_ver})")
-                self.notes_edit.setPlainText(notes or "Список изменений недоступен.")
-                self.btn_update.setEnabled(True)
-            elif tag:
-                self.lbl_status.setText(f"У вас установлена последняя версия v{cur_ver}")
-                self.notes_edit.setPlainText("Обновлений не требуется.")
-            else:
-                self.lbl_status.setText("Не удалось проверить обновления с GitHub.")
-                self.notes_edit.setPlainText("Проверьте подключение к сети или VPN.")
+            self.check_finished.emit((tag, url, notes, sha256, size))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _show_check_result(self, result):
+        tag, url, notes, sha256, size = result
+        cur_ver = appcore.CURRENT_APP_VERSION
+        if tag and appcore.is_newer_version(tag, cur_ver):
+            self._update_data = (tag, url, notes, sha256, size)
+            self.lbl_status.setText(f"Доступно обновление: v{tag} (у вас v{cur_ver})")
+            self.notes_edit.setPlainText(notes or "Список изменений недоступен.")
+            self.btn_update.setEnabled(True)
+        elif tag:
+            self.lbl_status.setText(f"У вас установлена последняя версия v{cur_ver}")
+            self.notes_edit.setPlainText("Обновлений не требуется.")
+        else:
+            self.lbl_status.setText("Не удалось проверить обновления с GitHub.")
+            self.notes_edit.setPlainText("Проверьте подключение к сети или VPN.")
 
     def _start_update(self):
         if not hasattr(self, "_update_data") or not self._update_data[1]:
@@ -304,27 +315,42 @@ class UpdateDialog(QDialog):
                 self.parent_app.log(
                     f"Ошибка скачивания обновления: {path_or_error}"
                 )
-                QMessageBox.critical(
-                    self, "Ошибка",
+                self.update_failed.emit(
                     f"Не удалось загрузить обновление.\n\n{path_or_error}"
                 )
                 return
 
             filename = "GibVPN_Smart_v3.exe"
             ok, msg = appcore.apply_downloaded_app_update_path(
-                path_or_error, filename, expected_sha256
+                path_or_error, filename, expected_sha256,
+                restart_vpn=getattr(self.parent_app, "is_running", False),
             )
             try:
                 os.remove(path_or_error)
             except OSError:
                 pass
             if ok:
-                self.parent_app.log(msg)
-                QMessageBox.information(self, "Обновление", msg)
-                self.parent_app._force_quit = True
-                self.parent_app.close()
+                self.update_prepared.emit(msg)
+            else:
+                self.update_failed.emit(msg)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _show_update_error(self, message):
+        self.btn_update.setEnabled(True)
+        self.lbl_status.setText("Не удалось установить обновление")
+        QMessageBox.critical(self, "Ошибка", message)
+
+    def _finish_update(self, message):
+        self.parent_app.log(message)
+        self.lbl_status.setText("Обновление готово. Перезапуск...")
+        self.parent_app._force_quit = True
+        QTimer.singleShot(250, self._quit_for_update)
+
+    def _quit_for_update(self):
+        self.accept()
+        self.parent_app.close()
+        QApplication.instance().quit()
 
 
 class SettingsDialog(QDialog):

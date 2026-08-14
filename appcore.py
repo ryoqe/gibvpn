@@ -1186,7 +1186,7 @@ def emergency_fix_internet():
     return True, log_lines
 
 
-CURRENT_APP_VERSION = "3.0.21"
+CURRENT_APP_VERSION = "3.0.22"
 
 
 def is_newer_version(candidate, current):
@@ -1355,39 +1355,83 @@ def download_github_app_asset(
         return False, str(exc)
 
 
-def _schedule_app_update(dest_path, filename):
-    import tempfile
-
-    temp_dir = os.path.dirname(dest_path)
+def _schedule_app_update(dest_path, filename, restart_vpn=False):
+    """Launch a detached updater that survives the GUI and one-file parent."""
     cur_exe = sys.executable
     if getattr(sys, 'frozen', False):
         import subprocess
-        bat_path = os.path.join(temp_dir, "update.bat")
-        script = f"""@echo off
-set tries=0
-:retry
-timeout /t 1 /nobreak > nul
-copy /y "{dest_path}" "{cur_exe}" > nul
-if not errorlevel 1 goto copied
-set /a tries+=1
-if %tries% lss 20 goto retry
-exit /b 1
-:copied
-start "" "{cur_exe}"
-del "{dest_path}" > nul 2>&1
-del "%~f0"
-"""
-        with open(bat_path, "w", encoding="utf-8") as f:
+        update_dir = os.path.dirname(dest_path)
+        script_path = os.path.join(update_dir, "apply_update.ps1")
+        status_path = os.path.join(APP_DIR, "update_status.log")
+        restart_line = (
+            f'Start-Process -FilePath "{cur_exe}" -ArgumentList "--start-vpn"'
+            if restart_vpn else f'Start-Process -FilePath "{cur_exe}"'
+        )
+        script = f'''$ErrorActionPreference = "Stop"
+$sourceExe = "{dest_path}"
+$installedExe = "{cur_exe}"
+$statusFile = "{status_path}"
+$copied = $false
+try {{
+    for ($attempt = 0; $attempt -lt 120; $attempt++) {{
+        Start-Sleep -Milliseconds 500
+        try {{
+            Copy-Item -LiteralPath $sourceExe -Destination $installedExe -Force
+            if ((Get-FileHash -LiteralPath $sourceExe -Algorithm SHA256).Hash -ne
+                (Get-FileHash -LiteralPath $installedExe -Algorithm SHA256).Hash) {{
+                throw "Hash mismatch after replacement"
+            }}
+            $copied = $true
+            break
+        }} catch {{
+            if ($attempt -eq 119) {{ throw }}
+        }}
+    }}
+    if (-not $copied) {{ throw "The old executable remained locked" }}
+    {restart_line}
+    Set-Content -LiteralPath $statusFile -Value "OK" -Encoding UTF8
+    Remove-Item -LiteralPath $sourceExe -Force -ErrorAction SilentlyContinue
+}} catch {{
+    Set-Content -LiteralPath $statusFile -Value ("ERROR: " + $_.Exception.Message) -Encoding UTF8
+}}
+'''
+        with open(script_path, "w", encoding="utf-8") as f:
             f.write(script)
-        subprocess.Popen(["cmd.exe", "/c", bat_path], creationflags=0x08000000)
+        creationflags = (
+            getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "DETACHED_PROCESS", 0)
+        )
+        command = [
+            "powershell.exe", "-NoProfile", "-WindowStyle", "Hidden",
+            "-ExecutionPolicy", "Bypass", "-File", script_path,
+        ]
+        launch_options = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "close_fds": True,
+        }
+        try:
+            # Escape a parent job when the launcher permits breakaway. This is
+            # important for packaged apps and managed desktop environments.
+            subprocess.Popen(
+                command,
+                creationflags=creationflags | 0x01000000,
+                **launch_options,
+            )
+        except OSError:
+            subprocess.Popen(
+                command, creationflags=creationflags, **launch_options,
+            )
         return True, "Обновление скачано! Перезапуск приложения..."
     return True, f"Файл обновления сохранён в {dest_path}"
 
 
-def apply_downloaded_app_update_path(file_path, filename, expected_sha256=None):
+def apply_downloaded_app_update_path(
+    file_path, filename, expected_sha256=None, restart_vpn=False,
+):
     """Verify a downloaded EXE by SHA-256 and schedule atomic replacement."""
-    import tempfile
-
     if not filename.lower().endswith(".exe"):
         return False, "Обновление должно быть исполняемым файлом .exe"
     try:
@@ -1406,13 +1450,14 @@ def apply_downloaded_app_update_path(file_path, filename, expected_sha256=None):
     if digest.hexdigest().lower() != expected_sha256.lower():
         return False, "SHA-256 обновления не совпадает; файл удалён"
 
-    temp_dir = tempfile.mkdtemp(prefix="gibvpn_update_")
-    dest_path = os.path.join(temp_dir, filename)
+    update_dir = os.path.join(APP_DIR, ".updates")
+    os.makedirs(update_dir, exist_ok=True)
+    dest_path = os.path.join(update_dir, filename + ".new")
     try:
         shutil.copy2(file_path, dest_path)
     except OSError as exc:
         return False, f"Не удалось подготовить обновление: {exc}"
-    return _schedule_app_update(dest_path, filename)
+    return _schedule_app_update(dest_path, filename, restart_vpn=restart_vpn)
 
 
 def apply_downloaded_app_update(file_bytes, filename, expected_sha256=None):
