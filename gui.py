@@ -1084,6 +1084,7 @@ class GibVPNApp(QMainWindow):
             self.set_status(f"TESTING {len(favorite_pairs)} FAVORITE SERVERS...", "orange")
             self.log(f"[CORE] Testing favorite servers first")
             fav_results = self._run_ping_test(favorite_pairs)
+            fav_results = self._prefer_named_server_results(fav_results, servers)
             if fav_results:
                 fav_results.sort(key=lambda x: x[1])
                 best_index, best_ping = fav_results[0]
@@ -1095,6 +1096,7 @@ class GibVPNApp(QMainWindow):
                 self.log("[CORE] No favorite server responded, testing regular servers")
             self.set_status(f"TESTING {len(regular_pairs)} REGULAR SERVERS...", "orange")
             reg_results = self._run_ping_test(regular_pairs)
+            reg_results = self._prefer_named_server_results(reg_results, servers)
             if reg_results:
                 reg_results.sort(key=lambda x: x[1])
                 best_index, best_ping = reg_results[0]
@@ -1175,6 +1177,7 @@ class GibVPNApp(QMainWindow):
             self.set_status(f"TESTING {len(favorite_pairs)} FAVORITE SERVERS...", "orange")
             self.log(f"[CORE] Testing favorite servers first")
             fav_results = self._run_availability_test(favorite_pairs)
+            fav_results = self._prefer_named_server_results(fav_results, servers)
             if fav_results:
                 fav_results.sort(key=lambda x: (-x[1], x[2]))
                 best_index, best_count, best_ping = fav_results[0]
@@ -1187,6 +1190,7 @@ class GibVPNApp(QMainWindow):
                 self.log("[CORE] No favorite server responded, testing regular servers")
             self.set_status(f"TESTING {len(regular_pairs)} REGULAR SERVERS...", "orange")
             reg_results = self._run_availability_test(regular_pairs)
+            reg_results = self._prefer_named_server_results(reg_results, servers)
             if reg_results:
                 reg_results.sort(key=lambda x: (-x[1], x[2]))
                 best_index, best_count, best_ping = reg_results[0]
@@ -2176,6 +2180,22 @@ class GibVPNApp(QMainWindow):
             else:
                 regular.append(srv)
         return favorites, regular, blocked
+
+    @staticmethod
+    def _is_auto_server(server):
+        """Whether a subscription entry delegates its exit country to provider.
+
+        Such entries are useful only as a last resort.  They must not win an
+        availability race over a named country: Google AI checks the final
+        country, while an "Auto" server can silently move it to another one.
+        """
+        remark = str((server or {}).get("remark", "")).casefold()
+        return "авто выбор" in remark or "auto selection" in remark
+
+    def _prefer_named_server_results(self, results, servers):
+        """Keep provider Auto entries only when no named server answered."""
+        named = [item for item in results if not self._is_auto_server(servers[item[0]])]
+        return named or results
 
     def _get_custom_servers(self):
         servers = []
