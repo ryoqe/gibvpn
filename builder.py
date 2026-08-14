@@ -758,6 +758,43 @@ def _process_route_rules(filename, outbound):
     return rules
 
 
+def read_tun_direct_domain_matchers():
+    """Translate Xray-style direct domain entries into sing-box matchers."""
+    suffixes = ["ru", "рф", "xn--p1ai", "ру", "xn--p1ag"]
+    exact = []
+    regex = []
+    path = _find_file_path("direct_domains.txt")
+    if os.path.exists(path):
+        for raw_line in read_text_file(path):
+            value = raw_line.strip()
+            if not value or value.startswith(("#", ";", "geosite:")):
+                continue
+            if value.startswith("regexp:"):
+                regex.append(value[len("regexp:"):])
+                continue
+            if value.startswith("full:"):
+                exact.append(value[len("full:"):].lstrip("."))
+                continue
+            if value.startswith("domain:"):
+                value = value[len("domain:"):]
+            suffixes.append(value.lstrip("."))
+
+    def unique(values):
+        result = []
+        seen = set()
+        for value in values:
+            if value and value.casefold() not in seen:
+                seen.add(value.casefold())
+                result.append(value)
+        return result
+
+    return {
+        "domain_suffix": unique(suffixes),
+        "domain": unique(exact),
+        "domain_regex": unique(regex),
+    }
+
+
 def get_warp_settings(profile_path=None):
     """Read a user-owned wgcf WireGuard profile; never use a shared key."""
     path = profile_path or _find_file_path("wgcf-profile.conf")
@@ -858,7 +895,10 @@ def generate_final_config(
     best_server, use_zapret=False, block_quic=True,
     resolve_endpoints=False,
 ):
-    direct_domains = ["domain:ru", "domain:рф", "domain:xn--p1ai"]
+    direct_domains = [
+        "domain:ru", "domain:рф", "domain:xn--p1ai",
+        "domain:ру", "domain:xn--p1ag",
+    ]
     if use_zapret:
         # Route YouTube, Discord, Instagram, Twitter, Torrent trackers, AI & Cloud tools
         # through direct outbound so winws.exe (Zapret) intercepts them at 100% ISP speed
@@ -1127,6 +1167,15 @@ def generate_tun_config(route_exclude_addresses=None):
     """
     forced_vpn_rules = _process_route_rules("vpn_apps.txt", "xray-out")
     direct_app_rules = _process_route_rules("direct_apps.txt", "direct")
+    direct_domain_matchers = read_tun_direct_domain_matchers()
+    direct_domain_rules = []
+    for field in ("domain_suffix", "domain", "domain_regex"):
+        if direct_domain_matchers[field]:
+            direct_domain_rules.append({
+                field: direct_domain_matchers[field],
+                "action": "route",
+                "outbound": "direct",
+            })
     config = {
         "log": {"level": "warn"},
         "dns": {
@@ -1207,6 +1256,13 @@ def generate_tun_config(route_exclude_addresses=None):
                     "action": "hijack-dns",
                 },
                 {"action": "hijack-dns", "protocol": "dns"},
+                {
+                    # Recover HTTP Host, TLS SNI and QUIC server names before
+                    # applying domain exclusions at the TUN layer.
+                    "action": "sniff",
+                    "timeout": "300ms",
+                },
+                *direct_domain_rules,
             ],
             "final": "xray-out",
         },
