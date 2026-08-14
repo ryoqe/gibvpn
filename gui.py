@@ -1084,7 +1084,6 @@ class GibVPNApp(QMainWindow):
             self.set_status(f"TESTING {len(favorite_pairs)} FAVORITE SERVERS...", "orange")
             self.log(f"[CORE] Testing favorite servers first")
             fav_results = self._run_ping_test(favorite_pairs)
-            fav_results = self._prefer_named_server_results(fav_results, servers)
             if fav_results:
                 fav_results.sort(key=lambda x: x[1])
                 best_index, best_ping = fav_results[0]
@@ -1096,7 +1095,6 @@ class GibVPNApp(QMainWindow):
                 self.log("[CORE] No favorite server responded, testing regular servers")
             self.set_status(f"TESTING {len(regular_pairs)} REGULAR SERVERS...", "orange")
             reg_results = self._run_ping_test(regular_pairs)
-            reg_results = self._prefer_named_server_results(reg_results, servers)
             if reg_results:
                 reg_results.sort(key=lambda x: x[1])
                 best_index, best_ping = reg_results[0]
@@ -1177,27 +1175,29 @@ class GibVPNApp(QMainWindow):
             self.set_status(f"TESTING {len(favorite_pairs)} FAVORITE SERVERS...", "orange")
             self.log(f"[CORE] Testing favorite servers first")
             fav_results = self._run_availability_test(favorite_pairs)
-            fav_results = self._prefer_named_server_results(fav_results, servers)
             if fav_results:
-                fav_results.sort(key=lambda x: (-x[1], x[2]))
-                best_index, best_count, best_ping = fav_results[0]
-                best_server = servers[best_index]
-                best_metric = (best_count, best_ping)
-                self.log(f"[CORE] Best favorite server: #{best_index}, {best_count}/{len(self.check_sites)} sites, avg {int(best_ping * 1000)}ms")
+                choice = self._pick_gemini_compatible(fav_results, servers)
+                if choice:
+                    best_index, best_count, best_ping = choice
+                    best_server = servers[best_index]
+                    best_metric = (best_count, best_ping)
+                    self.log(f"[CORE] Best favorite server: #{best_index}, {best_count}/{len(self.check_sites)} sites, avg {int(best_ping * 1000)}ms")
+                else:
+                    self.log("[AI] No favorite server passed the Gemini/WARP check; trying regular servers")
 
         if best_server is None and regular_pairs:
             if favorite_pairs:
                 self.log("[CORE] No favorite server responded, testing regular servers")
             self.set_status(f"TESTING {len(regular_pairs)} REGULAR SERVERS...", "orange")
             reg_results = self._run_availability_test(regular_pairs)
-            reg_results = self._prefer_named_server_results(reg_results, servers)
             if reg_results:
-                reg_results.sort(key=lambda x: (-x[1], x[2]))
-                best_index, best_count, best_ping = reg_results[0]
-                best_server = servers[best_index]
-                best_metric = (best_count, best_ping)
-                source = "regular"
-                self.log(f"[CORE] Best regular server: #{best_index}, {best_count}/{len(self.check_sites)} sites, avg {int(best_ping * 1000)}ms")
+                choice = self._pick_gemini_compatible(reg_results, servers)
+                if choice:
+                    best_index, best_count, best_ping = choice
+                    best_server = servers[best_index]
+                    best_metric = (best_count, best_ping)
+                    source = "regular"
+                    self.log(f"[CORE] Best regular server: #{best_index}, {best_count}/{len(self.check_sites)} sites, avg {int(best_ping * 1000)}ms")
 
         if best_server is None:
             self.set_status("ALL SERVERS ARE DEAD!", "red")
@@ -1436,6 +1436,61 @@ class GibVPNApp(QMainWindow):
             avg_ping = sum(pings) / len(pings)
             result_list.append((index, reachable, avg_ping))
 
+    def _gemini_route_works(self, server):
+        """Check a server's normal ``server -> personal WARP`` path.
+
+        A TCP connection or HTTP 200 alone is not enough: Google may return a
+        country stub or its ``/sorry`` anti-bot page with a successful status.
+        This probe never changes Windows proxy/TUN settings and is used only
+        while choosing a server before the final VPN is started.
+        """
+        if not builder.get_warp_settings():
+            return True
+        proc = None
+        try:
+            builder.generate_final_config(server, use_zapret=False, block_quic=True)
+            proc = self._spawn_xray(is_test=True)
+            if proc.poll() is not None or not appcore.wait_for_local_port(builder.WARP_SOCKS_PORT):
+                return False
+            session = requests.Session()
+            session.trust_env = False
+            response = session.get(
+                "https://gemini.google.com/",
+                proxies={
+                    "http": f"socks5h://127.0.0.1:{builder.WARP_SOCKS_PORT}",
+                    "https": f"socks5h://127.0.0.1:{builder.WARP_SOCKS_PORT}",
+                },
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=(4, 12),
+                allow_redirects=True,
+            )
+            text = (response.text or "").casefold()
+            final_url = (response.url or "").casefold()
+            blocked = (
+                "google.com/sorry" in final_url
+                or "location=unsupported" in final_url
+                or "isn't currently supported in your country" in text
+                or "not available in your country" in text
+                or "location=unsupported" in text
+            )
+            return response.status_code < 400 and not blocked
+        except Exception:
+            return False
+        finally:
+            if proc:
+                self._reap_xray(proc)
+
+    def _pick_gemini_compatible(self, results, servers):
+        """Return the best tested candidate whose WARP route is usable."""
+        for result in sorted(results, key=lambda item: (-item[1], item[2])):
+            index = result[0]
+            server = servers[index]
+            if self._gemini_route_works(server):
+                self.log(f"[AI] Gemini-compatible server: #{index}")
+                return result
+            self.log(f"[AI] Server #{index} is reachable, but Google rejected its WARP exit")
+        return None
+
     def _run_ping_test(self, servers_with_index, kill_existing=True):
         if not servers_with_index:
             return []
@@ -1611,7 +1666,6 @@ class GibVPNApp(QMainWindow):
             use_zapret=use_zap,
             block_quic=getattr(self, "block_quic", True),
             resolve_endpoints=self.use_tun,
-            warp_transit_server=self._warp_transit_server(best_server),
         )
 
         vpn_host = builder.server_address(best_server)
@@ -2181,36 +2235,6 @@ class GibVPNApp(QMainWindow):
             else:
                 regular.append(srv)
         return favorites, regular, blocked
-
-    @staticmethod
-    def _is_auto_server(server):
-        """Whether a subscription entry delegates its exit country to provider.
-
-        Such entries are useful only as a last resort.  They must not win an
-        availability race over a named country: Google AI checks the final
-        country, while an "Auto" server can silently move it to another one.
-        """
-        remark = str((server or {}).get("remark", "")).casefold()
-        return "авто выбор" in remark or "auto selection" in remark
-
-    def _prefer_named_server_results(self, results, servers):
-        """Keep provider Auto entries only when no named server answered."""
-        named = [item for item in results if not self._is_auto_server(servers[item[0]])]
-        return named or results
-
-    def _warp_transit_server(self, best_server):
-        """Return the provider's live Auto exit only for the WARP transport.
-
-        The named server remains the full-VPN exit.  This prevents Google AI
-        from inheriting a temporarily blocked IP range without silently
-        changing the country of the user's normal traffic.
-        """
-        best_key = builder.server_key(best_server)
-        for server in getattr(self, "_servers", []):
-            if (self._is_auto_server(server)
-                    and builder.server_key(server) != best_key):
-                return server
-        return None
 
     def _get_custom_servers(self):
         servers = []
