@@ -893,7 +893,7 @@ def _pin_wireguard_endpoint(warp_settings):
 
 def generate_final_config(
     best_server, use_zapret=False, block_quic=True,
-    resolve_endpoints=False,
+    resolve_endpoints=False, warp_transit_server=None,
 ):
     direct_domains = [
         "domain:ru", "domain:рф", "domain:xn--p1ai",
@@ -994,6 +994,13 @@ def generate_final_config(
         if resolve_endpoints else copy.deepcopy(best_server)
     )
     best_server["tag"] = "best-proxy"
+    warp_transit = None
+    if warp_transit_server:
+        warp_transit = (
+            _pin_server_endpoint(warp_transit_server)
+            if resolve_endpoints else copy.deepcopy(warp_transit_server)
+        )
+        warp_transit["tag"] = "warp-transit"
     warp_settings = get_warp_settings()
     if warp_settings and resolve_endpoints:
         warp_settings = _pin_wireguard_endpoint(warp_settings)
@@ -1004,11 +1011,17 @@ def generate_final_config(
         {"tag": "blocked", "protocol": "blackhole"},
         {"tag": "api", "protocol": "freedom"}
     ]
+    if warp_transit:
+        outbounds.insert(1, warp_transit)
     if warp_settings:
         outbounds.insert(1, {
             "tag": "warp-proxy", "protocol": "wireguard",
             "settings": warp_settings,
-            "streamSettings": {"sockopt": {"dialerProxy": "best-proxy"}},
+            # A dedicated supported-country transit prevents Cloudflare
+            # anycast from returning Google AI traffic to a rejected colo.
+            "streamSettings": {"sockopt": {
+                "dialerProxy": "warp-transit" if warp_transit else "best-proxy"
+            }},
         })
 
     rules = [

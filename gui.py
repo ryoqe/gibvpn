@@ -1559,6 +1559,27 @@ class GibVPNApp(QMainWindow):
         finally:
             self._reconnect_in_progress = False
 
+    def _find_warp_transit_server(self, best_server):
+        """Prefer a subscription endpoint explicitly intended for Gemini.
+
+        WARP uses anycast, so its public exit follows the VPN endpoint used to
+        reach Cloudflare.  Keeping this transit separate from the main server
+        lets the normal VPN stay fast while Google AI receives a stable exit
+        from a supported region.
+        """
+        active_sub = self._active_subscription()
+        states = (active_sub or {}).get("states", {})
+        for server in getattr(self, "_servers", []) or []:
+            remark = str(server.get("remark", ""))
+            if "gemini" not in remark.casefold():
+                continue
+            if states.get(builder.server_key(server)) == "blocked":
+                continue
+            if builder.server_key(server) == builder.server_key(best_server):
+                return None
+            return server
+        return None
+
     def _start_best_server(self, best_server, best_index, ping_ms, start_watcher=True):
         if self.use_tun and not appcore.is_windows_admin():
             self.is_running = False
@@ -1587,16 +1608,27 @@ class GibVPNApp(QMainWindow):
                 )
                 return
         use_zap = getattr(self, "use_zapret", False)
+        warp_transit_server = self._find_warp_transit_server(best_server)
         tun_server_address = (
             builder.resolved_server_address(best_server)
             if self.connection_mode == "tun" else ""
+        )
+        warp_transit_address = (
+            builder.resolved_server_address(warp_transit_server)
+            if self.connection_mode == "tun" and warp_transit_server else ""
         )
         builder.generate_final_config(
             best_server,
             use_zapret=use_zap,
             block_quic=getattr(self, "block_quic", True),
             resolve_endpoints=self.use_tun,
+            warp_transit_server=warp_transit_server,
         )
+        if warp_transit_server:
+            self.log(
+                "[WARP] Cloudflare transit: "
+                f"{warp_transit_server.get('remark') or builder.server_key(warp_transit_server)}"
+            )
 
         vpn_host = builder.server_address(best_server)
         if use_zap and getattr(self, "zapret_dir", None):
@@ -1628,7 +1660,10 @@ class GibVPNApp(QMainWindow):
             if appcore.recover_antigravity_proxy():
                 self.log("[SYSTEM] Перед запуском TUN убран отдельный прокси Antigravity")
             try:
-                exclusions = [tun_server_address] if tun_server_address else []
+                exclusions = [
+                    address for address in
+                    (tun_server_address, warp_transit_address) if address
+                ]
                 self.tun_process = self._spawn_tun(exclusions)
                 self.log("[TUN] Полный VPN включён: весь TCP/UDP и DNS идут через VPN")
                 forced = builder.read_process_route_matchers("vpn_apps.txt")
