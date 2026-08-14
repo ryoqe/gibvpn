@@ -984,13 +984,26 @@ def generate_final_config(
                 "port": 10808,
                 "listen": "127.0.0.1",
                 "protocol": "socks",
-                "settings": {"udp": True}
+                "settings": {"udp": True},
+                # In TUN mode sing-box forwards the resolved destination IP.
+                # Recover HTTP/TLS SNI so domain-based WARP rules still match
+                # Antigravity, NotebookLM, ChatGPT and other AI endpoints.
+                "sniffing": {
+                    "enabled": True,
+                    "destOverride": ["http", "tls", "quic"],
+                    "routeOnly": True,
+                },
             },
             {
                 "tag": "http-in",
                 "port": 10809,
                 "listen": "127.0.0.1",
-                "protocol": "http"
+                "protocol": "http",
+                "sniffing": {
+                    "enabled": True,
+                    "destOverride": ["http", "tls"],
+                    "routeOnly": True,
+                },
             },
             {
                 "tag": "api-in",
