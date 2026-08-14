@@ -1611,6 +1611,7 @@ class GibVPNApp(QMainWindow):
             use_zapret=use_zap,
             block_quic=getattr(self, "block_quic", True),
             resolve_endpoints=self.use_tun,
+            warp_transit_server=self._warp_transit_server(best_server),
         )
 
         vpn_host = builder.server_address(best_server)
@@ -2196,6 +2197,20 @@ class GibVPNApp(QMainWindow):
         """Keep provider Auto entries only when no named server answered."""
         named = [item for item in results if not self._is_auto_server(servers[item[0]])]
         return named or results
+
+    def _warp_transit_server(self, best_server):
+        """Return the provider's live Auto exit only for the WARP transport.
+
+        The named server remains the full-VPN exit.  This prevents Google AI
+        from inheriting a temporarily blocked IP range without silently
+        changing the country of the user's normal traffic.
+        """
+        best_key = builder.server_key(best_server)
+        for server in getattr(self, "_servers", []):
+            if (self._is_auto_server(server)
+                    and builder.server_key(server) != best_key):
+                return server
+        return None
 
     def _get_custom_servers(self):
         servers = []
