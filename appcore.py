@@ -1233,7 +1233,7 @@ def emergency_fix_internet():
     return True, log_lines
 
 
-CURRENT_APP_VERSION = "3.0.24"
+CURRENT_APP_VERSION = "3.0.25"
 
 
 def is_newer_version(candidate, current):

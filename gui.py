@@ -1424,8 +1424,13 @@ class GibVPNApp(QMainWindow):
                     pings.append(time.time() - start)
             except Exception:
                 pass
-        avg_ping = (sum(pings) / len(pings)) if pings else 999.0
-        result_list.append((index, reachable, avg_ping))
+        # A probe process can open its local SOCKS port even when the remote
+        # server behind that port is dead. Do not report such a server as a
+        # successful result: max-availability used to select a dead Favorite
+        # with ``0/N`` sites and never fall back to working regular servers.
+        if reachable:
+            avg_ping = sum(pings) / len(pings)
+            result_list.append((index, reachable, avg_ping))
 
     def _run_ping_test(self, servers_with_index, kill_existing=True):
         if not servers_with_index:
