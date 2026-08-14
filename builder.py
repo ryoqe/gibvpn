@@ -853,6 +853,8 @@ def generate_final_config(
         "domain:ai.google.dev",
         "domain:deepmind.google",
         "domain:generativelanguage.googleapis.com",
+        # Antigravity 2.0 uses this separate Cloud Code model backend.
+        "domain:daily-cloudcode-pa.googleapis.com",
         "domain:gemini.gstatic.com",
         "domain:geller-pa.googleapis.com",
         "domain:alkalimakersuite-pa.clients6.google.com",

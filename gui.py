@@ -115,6 +115,7 @@ class GibVPNApp(QMainWindow):
         self.use_system_proxy = True
         self.use_tun = False
         self._system_proxy_snapshot = None
+        self._environment_proxy_snapshot = None
         self.sub_auto_update_hours = 24
         self._sub_update_running = False
 
@@ -156,6 +157,8 @@ class GibVPNApp(QMainWindow):
         self.load_settings()
         if appcore.recover_windows_system_proxy():
             self.log("[SYSTEM] После прошлого завершения восстановлены настройки прокси Windows")
+        if appcore.recover_user_environment_proxy():
+            self.log("[SYSTEM] После прошлого завершения восстановлен прокси приложений")
         self._setup_tray()
         self._setup_hotkeys()
 
@@ -1606,6 +1609,8 @@ class GibVPNApp(QMainWindow):
             # TUN could accidentally be active at the same time.
             if appcore.recover_windows_system_proxy():
                 self.log("[SYSTEM] Перед запуском TUN отключён старый прокси GibVPN")
+            if appcore.recover_user_environment_proxy():
+                self.log("[SYSTEM] Перед запуском TUN убран старый прокси приложений GibVPN")
             try:
                 self.tun_process = self._spawn_tun()
                 self.log("[TUN] Полный VPN включён: весь TCP/UDP и DNS идут через VPN")
@@ -1615,9 +1620,19 @@ class GibVPNApp(QMainWindow):
                 raise
         else:
             try:
-                self._system_proxy_snapshot = appcore.enable_windows_system_proxy()
-                appcore.save_windows_system_proxy_backup(self._system_proxy_snapshot)
+                # A reconnect must keep the original pre-VPN snapshots. Taking
+                # a second snapshot here would save GibVPN's own proxy as the
+                # value to restore and could leave Internet broken on exit.
+                if self._system_proxy_snapshot is None:
+                    self._system_proxy_snapshot = appcore.enable_windows_system_proxy()
+                    appcore.save_windows_system_proxy_backup(self._system_proxy_snapshot)
+                if self._environment_proxy_snapshot is None:
+                    self._environment_proxy_snapshot = appcore.enable_user_environment_proxy()
+                    appcore.save_user_environment_proxy_backup(
+                        self._environment_proxy_snapshot
+                    )
                 self.log("[SYSTEM] Прокси Windows включён: 127.0.0.1:10809")
+                self.log("[SYSTEM] Фоновые приложения направлены через локальный VPN-прокси")
             except OSError as exc:
                 self.log(f"[SYSTEM] Не удалось включить прокси Windows: {exc}")
         self.is_running = True
@@ -1749,6 +1764,17 @@ class GibVPNApp(QMainWindow):
                 self.log(f"[SYSTEM] Не удалось восстановить прокси Windows: {exc}")
             finally:
                 self._system_proxy_snapshot = None
+        if self._environment_proxy_snapshot is not None:
+            try:
+                appcore.restore_user_environment_proxy(
+                    self._environment_proxy_snapshot
+                )
+                appcore.clear_user_environment_proxy_backup()
+                self.log("[SYSTEM] Восстановлены прежние настройки прокси приложений")
+            except OSError as exc:
+                self.log(f"[SYSTEM] Не удалось восстановить прокси приложений: {exc}")
+            finally:
+                self._environment_proxy_snapshot = None
         if self.zapret_process or self.use_zapret:
             stop_zapret_process(self.zapret_process)
             self.zapret_process = None

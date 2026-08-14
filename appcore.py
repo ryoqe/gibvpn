@@ -375,6 +375,9 @@ SYSTEM_PROXY_VALUES = (
     "ProxyEnable", "ProxyServer", "ProxyOverride", "AutoConfigURL", "AutoDetect",
 )
 SYSTEM_PROXY_BACKUP_PATH = os.path.join(APP_DIR, "system_proxy_backup.json")
+ENVIRONMENT_PROXY_VALUES = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
+ENVIRONMENT_PROXY_BACKUP_PATH = os.path.join(APP_DIR, "environment_proxy_backup.json")
+LOCAL_HTTP_PROXY_URL = "http://127.0.0.1:10809"
 
 
 def read_windows_system_proxy():
@@ -457,6 +460,127 @@ def recover_windows_system_proxy():
         if is_ours:
             restore_windows_system_proxy(snapshot)
         clear_windows_system_proxy_backup()
+        return is_ours
+    except (OSError, ValueError):
+        return False
+
+
+def _broadcast_environment_change():
+    r"""Tell newly launched desktop applications that HKCU\Environment changed."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        result = wintypes.DWORD()
+        ctypes.windll.user32.SendMessageTimeoutW(
+            0xFFFF, 0x001A, 0, ctypes.c_wchar_p("Environment"), 0x0002, 2000,
+            ctypes.byref(result),
+        )
+    except Exception:
+        pass
+
+
+def read_user_environment_proxy():
+    """Snapshot proxy-related user environment values, preserving their types."""
+    import winreg
+    snapshot = {}
+    try:
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_READ,
+        )
+    except FileNotFoundError:
+        return {name: {"exists": False} for name in ENVIRONMENT_PROXY_VALUES}
+    with key:
+        for name in ENVIRONMENT_PROXY_VALUES:
+            try:
+                value, value_type = winreg.QueryValueEx(key, name)
+                snapshot[name] = {
+                    "exists": True, "value": value, "type": value_type,
+                }
+            except FileNotFoundError:
+                snapshot[name] = {"exists": False}
+    return snapshot
+
+
+def restore_user_environment_proxy(snapshot):
+    """Restore environment proxy values without touching unrelated variables."""
+    import winreg
+    if not snapshot:
+        return
+    with winreg.CreateKeyEx(
+        winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE,
+    ) as key:
+        for name in ENVIRONMENT_PROXY_VALUES:
+            item = snapshot.get(name, {"exists": False})
+            if item.get("exists"):
+                winreg.SetValueEx(key, name, 0, item["type"], item["value"])
+                os.environ[name] = str(item["value"])
+            else:
+                try:
+                    winreg.DeleteValue(key, name)
+                except FileNotFoundError:
+                    pass
+                os.environ.pop(name, None)
+    _broadcast_environment_change()
+
+
+def enable_user_environment_proxy(proxy_url=LOCAL_HTTP_PROXY_URL):
+    """Cover apps (including Antigravity) that ignore Windows Internet Settings."""
+    import winreg
+    snapshot = read_user_environment_proxy()
+    previous_no_proxy = str(snapshot.get("NO_PROXY", {}).get("value", "") or "")
+    exclusions = [part.strip() for part in previous_no_proxy.split(",") if part.strip()]
+    exclusion_keys = {item.lower() for item in exclusions}
+    for local_host in ("localhost", "127.0.0.1", "::1"):
+        if local_host.lower() not in exclusion_keys:
+            exclusions.append(local_host)
+            exclusion_keys.add(local_host.lower())
+    no_proxy = ",".join(exclusions)
+    with winreg.CreateKeyEx(
+        winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE,
+    ) as key:
+        winreg.SetValueEx(key, "HTTP_PROXY", 0, winreg.REG_SZ, proxy_url)
+        winreg.SetValueEx(key, "HTTPS_PROXY", 0, winreg.REG_SZ, proxy_url)
+        winreg.SetValueEx(key, "NO_PROXY", 0, winreg.REG_SZ, no_proxy)
+    os.environ["HTTP_PROXY"] = proxy_url
+    os.environ["HTTPS_PROXY"] = proxy_url
+    os.environ["NO_PROXY"] = no_proxy
+    _broadcast_environment_change()
+    return snapshot
+
+
+def save_user_environment_proxy_backup(snapshot):
+    import json
+    temp_path = ENVIRONMENT_PROXY_BACKUP_PATH + ".tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(snapshot, handle)
+    os.replace(temp_path, ENVIRONMENT_PROXY_BACKUP_PATH)
+
+
+def clear_user_environment_proxy_backup():
+    try:
+        os.remove(ENVIRONMENT_PROXY_BACKUP_PATH)
+    except FileNotFoundError:
+        pass
+
+
+def recover_user_environment_proxy():
+    """Recover only environment values that still point to GibVPN itself."""
+    import json
+    if not os.path.exists(ENVIRONMENT_PROXY_BACKUP_PATH):
+        return False
+    try:
+        with open(ENVIRONMENT_PROXY_BACKUP_PATH, "r", encoding="utf-8") as handle:
+            snapshot = json.load(handle)
+        current = read_user_environment_proxy()
+        is_ours = all(
+            current.get(name, {}).get("value") == LOCAL_HTTP_PROXY_URL
+            for name in ("HTTP_PROXY", "HTTPS_PROXY")
+        )
+        if is_ours:
+            restore_user_environment_proxy(snapshot)
+        clear_user_environment_proxy_backup()
         return is_ours
     except (OSError, ValueError):
         return False
@@ -923,6 +1047,9 @@ def emergency_fix_internet():
     """
     import subprocess, winreg
     log_lines = []
+
+    if recover_user_environment_proxy():
+        log_lines.append("Восстановлены переменные прокси приложений GibVPN")
 
     # Do not kill every winws.exe on the computer: it may belong to another
     # application. New GibVPN helpers are tied to the app's Windows Job Object.
