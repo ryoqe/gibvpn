@@ -378,6 +378,11 @@ SYSTEM_PROXY_BACKUP_PATH = os.path.join(APP_DIR, "system_proxy_backup.json")
 ENVIRONMENT_PROXY_VALUES = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
 ENVIRONMENT_PROXY_BACKUP_PATH = os.path.join(APP_DIR, "environment_proxy_backup.json")
 LOCAL_HTTP_PROXY_URL = "http://127.0.0.1:10809"
+ANTIGRAVITY_PROXY_BACKUP_PATH = os.path.join(APP_DIR, "antigravity_proxy_backup.json")
+ANTIGRAVITY_SETTINGS_PATH = os.path.join(
+    os.environ.get("APPDATA", os.path.expanduser("~")),
+    "Antigravity", "User", "settings.json",
+)
 
 
 def read_windows_system_proxy():
@@ -584,6 +589,88 @@ def recover_user_environment_proxy():
         return is_ours
     except (OSError, ValueError):
         return False
+
+
+def enable_antigravity_proxy(proxy_url=LOCAL_HTTP_PROXY_URL):
+    """Set Antigravity's explicit backend proxy while preserving user settings.
+
+    Its model language server does not consistently inherit Explorer's updated
+    environment or the Windows Chromium proxy.  The editor-level ``http.proxy``
+    value is consumed by that backend and is therefore required in proxy mode.
+    """
+    import json
+
+    settings_dir = os.path.dirname(ANTIGRAVITY_SETTINGS_PATH)
+    if not os.path.isdir(os.path.dirname(settings_dir)):
+        return False
+    os.makedirs(settings_dir, exist_ok=True)
+    try:
+        if os.path.exists(ANTIGRAVITY_SETTINGS_PATH):
+            with open(ANTIGRAVITY_SETTINGS_PATH, "r", encoding="utf-8-sig") as handle:
+                settings = json.load(handle)
+        else:
+            settings = {}
+        if not isinstance(settings, dict):
+            return False
+
+        if not os.path.exists(ANTIGRAVITY_PROXY_BACKUP_PATH):
+            snapshot = {}
+            for name in ("http.proxy", "http.proxySupport"):
+                snapshot[name] = (
+                    {"exists": True, "value": settings[name]}
+                    if name in settings else {"exists": False}
+                )
+            temp_backup = ANTIGRAVITY_PROXY_BACKUP_PATH + ".tmp"
+            with open(temp_backup, "w", encoding="utf-8") as handle:
+                json.dump(snapshot, handle, ensure_ascii=False, indent=2)
+            os.replace(temp_backup, ANTIGRAVITY_PROXY_BACKUP_PATH)
+
+        settings["http.proxy"] = proxy_url
+        settings["http.proxySupport"] = "override"
+        temp_settings = ANTIGRAVITY_SETTINGS_PATH + ".tmp"
+        with open(temp_settings, "w", encoding="utf-8") as handle:
+            json.dump(settings, handle, ensure_ascii=False, indent=4)
+            handle.write("\n")
+        os.replace(temp_settings, ANTIGRAVITY_SETTINGS_PATH)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def recover_antigravity_proxy():
+    """Restore Antigravity proxy keys if they are still managed by GibVPN."""
+    import json
+
+    if not os.path.exists(ANTIGRAVITY_PROXY_BACKUP_PATH):
+        return False
+    restored = False
+    try:
+        with open(ANTIGRAVITY_PROXY_BACKUP_PATH, "r", encoding="utf-8") as handle:
+            snapshot = json.load(handle)
+        with open(ANTIGRAVITY_SETTINGS_PATH, "r", encoding="utf-8-sig") as handle:
+            settings = json.load(handle)
+        if (isinstance(settings, dict) and
+                settings.get("http.proxy") == LOCAL_HTTP_PROXY_URL):
+            for name in ("http.proxy", "http.proxySupport"):
+                item = snapshot.get(name, {"exists": False})
+                if item.get("exists"):
+                    settings[name] = item.get("value")
+                else:
+                    settings.pop(name, None)
+            temp_settings = ANTIGRAVITY_SETTINGS_PATH + ".tmp"
+            with open(temp_settings, "w", encoding="utf-8") as handle:
+                json.dump(settings, handle, ensure_ascii=False, indent=4)
+                handle.write("\n")
+            os.replace(temp_settings, ANTIGRAVITY_SETTINGS_PATH)
+            restored = True
+    except (OSError, ValueError, TypeError):
+        pass
+    finally:
+        try:
+            os.remove(ANTIGRAVITY_PROXY_BACKUP_PATH)
+        except FileNotFoundError:
+            pass
+    return restored
 
 # Migrate settings/cache from a previous one-file install located in the parent
 # directory (e.g. dist/GibVPN_Smart_v3.exe + dist/app_settings.json) to the
@@ -1050,6 +1137,8 @@ def emergency_fix_internet():
 
     if recover_user_environment_proxy():
         log_lines.append("Восстановлены переменные прокси приложений GibVPN")
+    if recover_antigravity_proxy():
+        log_lines.append("Восстановлены настройки прокси Antigravity")
 
     # Do not kill every winws.exe on the computer: it may belong to another
     # application. New GibVPN helpers are tied to the app's Windows Job Object.
@@ -1096,7 +1185,7 @@ def emergency_fix_internet():
     return True, log_lines
 
 
-CURRENT_APP_VERSION = "3.0.15"
+CURRENT_APP_VERSION = "3.0.16"
 
 
 def is_newer_version(candidate, current):

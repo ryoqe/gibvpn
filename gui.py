@@ -159,6 +159,8 @@ class GibVPNApp(QMainWindow):
             self.log("[SYSTEM] После прошлого завершения восстановлены настройки прокси Windows")
         if appcore.recover_user_environment_proxy():
             self.log("[SYSTEM] После прошлого завершения восстановлен прокси приложений")
+        if appcore.recover_antigravity_proxy():
+            self.log("[SYSTEM] Восстановлены прежние настройки Antigravity")
         self._setup_tray()
         self._setup_hotkeys()
 
@@ -934,11 +936,11 @@ class GibVPNApp(QMainWindow):
             self._xray_processes.add(proc)
         return proc
 
-    def _spawn_tun(self):
+    def _spawn_tun(self, route_exclude_addresses=None):
         singbox_exe = appcore.find_singbox_exe()
         if not singbox_exe:
             raise RuntimeError("sing-box.exe не найден в папке программы")
-        config_path = builder.generate_tun_config()
+        config_path = builder.generate_tun_config(route_exclude_addresses)
         proc = subprocess.Popen(
             [singbox_exe, "run", "-c", config_path],
             cwd=os.path.dirname(singbox_exe),
@@ -949,7 +951,7 @@ class GibVPNApp(QMainWindow):
         appcore.attach_process_to_app_job(proc)
         # Windows needs a moment to apply the new interface DNS and route
         # metrics. Testing too early produces a false "no Internet" failure.
-        time.sleep(1.5)
+        time.sleep(2.5)
         if proc.poll() is not None:
             error = (proc.stderr.read() or b"").decode("utf-8", errors="replace").strip()
             raise RuntimeError(error or "sing-box не смог создать TUN-адаптер")
@@ -963,9 +965,17 @@ class GibVPNApp(QMainWindow):
                     proc.kill()
                 except Exception:
                     pass
+            tun_error = ""
+            try:
+                tun_error = (proc.stderr.read() or b"").decode(
+                    "utf-8", errors="replace"
+                ).strip()
+            except Exception:
+                pass
             raise RuntimeError(
                 "TUN создан, но проверка Интернета не прошла. "
                 f"Маршруты автоматически отменены: {details}"
+                + (f"; sing-box: {tun_error[-1000:]}" if tun_error else "")
             )
         return proc
 
@@ -1591,6 +1601,10 @@ class GibVPNApp(QMainWindow):
                 )
                 return
         use_zap = getattr(self, "use_zapret", False)
+        tun_server_address = (
+            builder.resolved_server_address(best_server)
+            if self.connection_mode == "tun" else ""
+        )
         builder.generate_final_config(
             best_server,
             use_zapret=use_zap,
@@ -1625,8 +1639,11 @@ class GibVPNApp(QMainWindow):
                 self.log("[SYSTEM] Перед запуском TUN отключён старый прокси GibVPN")
             if appcore.recover_user_environment_proxy():
                 self.log("[SYSTEM] Перед запуском TUN убран старый прокси приложений GibVPN")
+            if appcore.recover_antigravity_proxy():
+                self.log("[SYSTEM] Перед запуском TUN убран отдельный прокси Antigravity")
             try:
-                self.tun_process = self._spawn_tun()
+                exclusions = [tun_server_address] if tun_server_address else []
+                self.tun_process = self._spawn_tun(exclusions)
                 self.log("[TUN] Полный VPN включён: весь TCP/UDP и DNS идут через VPN")
             except Exception:
                 self._reap_xray(self.xray_process)
@@ -1645,6 +1662,8 @@ class GibVPNApp(QMainWindow):
                     appcore.save_user_environment_proxy_backup(
                         self._environment_proxy_snapshot
                     )
+                if appcore.enable_antigravity_proxy():
+                    self.log("[SYSTEM] Модельный процесс Antigravity направлен через VPN")
                 self.log("[SYSTEM] Прокси Windows включён: 127.0.0.1:10809")
                 self.log("[SYSTEM] Фоновые приложения направлены через локальный VPN-прокси")
             except OSError as exc:
@@ -1789,6 +1808,8 @@ class GibVPNApp(QMainWindow):
                 self.log(f"[SYSTEM] Не удалось восстановить прокси приложений: {exc}")
             finally:
                 self._environment_proxy_snapshot = None
+        if appcore.recover_antigravity_proxy():
+            self.log("[SYSTEM] Восстановлены прежние настройки Antigravity")
         if self.zapret_process or self.use_zapret:
             stop_zapret_process(self.zapret_process)
             self.zapret_process = None

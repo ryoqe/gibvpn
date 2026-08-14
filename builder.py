@@ -764,6 +764,15 @@ def _resolved_ip(host):
         return value
 
 
+def resolved_server_address(server):
+    """Return a concrete IPv4 endpoint suitable for a Windows route exclusion."""
+    resolved = _resolved_ip(server_address(server))
+    try:
+        return resolved if ipaddress.ip_address(resolved).version == 4 else ""
+    except ValueError:
+        return ""
+
+
 def _pin_server_endpoint(server):
     pinned = copy.deepcopy(server)
     settings = pinned.get("settings", {})
@@ -1012,7 +1021,7 @@ def generate_final_config(
     return True
 
 
-def generate_tun_config():
+def generate_tun_config(route_exclude_addresses=None):
     """Generate a full-device TUN config that forwards every packet to Xray.
 
     Xray still owns server selection and transport.  sing-box only creates the
@@ -1024,12 +1033,11 @@ def generate_tun_config():
         "dns": {
             "servers": [{
                 "tag": "remote-dns",
-                "type": "https",
+                # Plain DNS over TCP inside the encrypted Xray tunnel avoids
+                # the TLS/bootstrap deadlock observed on Windows TUN startup.
+                "type": "tcp",
                 "server": "1.1.1.1",
-                "path": "/dns-query",
-                # The IP avoids a bootstrap DNS request while the explicit
-                # SNI makes the TLS certificate check deterministic.
-                "tls": {"server_name": "cloudflare-dns.com"},
+                "server_port": 53,
                 "detour": "xray-out",
             }],
             "final": "remote-dns",
@@ -1047,7 +1055,10 @@ def generate_tun_config():
             # SOCKS/Xray hop it causes fragmentation and slow ChatGPT/media.
             "mtu": TUN_MTU,
             "auto_route": True,
-            "strict_route": True,
+            # Windows strict_route installs a WFP DNS block on every physical
+            # interface.  On some builds it also blocks sing-box's own DNS
+            # transport and leaves the machine without name resolution.
+            "strict_route": False,
             "stack": "system",
         }],
         "outbounds": [
@@ -1080,6 +1091,17 @@ def generate_tun_config():
             "final": "xray-out",
         },
     }
+    exclusions = []
+    for address in route_exclude_addresses or []:
+        try:
+            ip = ipaddress.ip_address(str(address).strip())
+        except ValueError:
+            continue
+        exclusions.append(f"{ip}/{32 if ip.version == 4 else 128}")
+    if exclusions:
+        # Keep Xray's physical VPN connection outside the captured default
+        # route.  This prevents TUN -> Xray -> TUN recursion at the OS layer.
+        config["inbounds"][0]["route_exclude_address"] = exclusions
     config_path = os.path.join(WORK_DIR, SINGBOX_TUN_CONFIG)
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
