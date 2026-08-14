@@ -97,14 +97,20 @@ class GibVPNApp(QMainWindow):
         self._test_port_offset = 0
         self.custom_links = []
 
+        # Another VPN client may already own the traditional 10808 ports.
+        # Pick a complete free block before configs or proxy settings exist.
+        self.local_port_base = appcore.find_free_local_port_block()
+        builder.configure_local_ports(self.local_port_base)
+        appcore.configure_local_proxy_ports(self.local_port_base)
+
         self.check_sites = dict(DEFAULT_CHECK_SITES)
         self.gpt_check_urls = {
             "ChatGPT": "https://chatgpt.com/api/auth/session",
             "OpenAI auth": "https://auth.openai.com/",
         }
         self.proxy_dict = {
-            "http": "http://127.0.0.1:10809",
-            "https": "http://127.0.0.1:10809"
+            "http": appcore.LOCAL_HTTP_PROXY_URL,
+            "https": appcore.LOCAL_HTTP_PROXY_URL,
         }
 
         self.subscriptions = []
@@ -1262,7 +1268,7 @@ class GibVPNApp(QMainWindow):
                 builder.generate_final_config(srv, use_zapret=False, block_quic=True)
                 proc = self._spawn_xray(is_test=True)
                 time.sleep(0.3)
-                speed_bps, sp_str = builder.measure_server_speed(10808)
+                speed_bps, sp_str = builder.measure_server_speed(builder.SOCKS_PORT)
                 self._reap_xray(proc)
                 key = builder.server_key(srv)
                 self.log(f"[SPEED] Server #{orig_i} ({key}): {sp_str}")
@@ -1349,7 +1355,7 @@ class GibVPNApp(QMainWindow):
                 builder.generate_final_config(srv, use_zapret=False, block_quic=True)
                 proc = self._spawn_xray(is_test=True)
                 time.sleep(0.3)
-                speed_bps, sp_str = builder.measure_server_speed(10808)
+                speed_bps, sp_str = builder.measure_server_speed(builder.SOCKS_PORT)
                 self._reap_xray(proc)
             except Exception:
                 pass
@@ -1559,27 +1565,6 @@ class GibVPNApp(QMainWindow):
         finally:
             self._reconnect_in_progress = False
 
-    def _find_warp_transit_server(self, best_server):
-        """Prefer a subscription endpoint explicitly intended for Gemini.
-
-        WARP uses anycast, so its public exit follows the VPN endpoint used to
-        reach Cloudflare.  Keeping this transit separate from the main server
-        lets the normal VPN stay fast while Google AI receives a stable exit
-        from a supported region.
-        """
-        active_sub = self._active_subscription()
-        states = (active_sub or {}).get("states", {})
-        for server in getattr(self, "_servers", []) or []:
-            remark = str(server.get("remark", ""))
-            if "gemini" not in remark.casefold():
-                continue
-            if states.get(builder.server_key(server)) == "blocked":
-                continue
-            if builder.server_key(server) == builder.server_key(best_server):
-                return None
-            return server
-        return None
-
     def _start_best_server(self, best_server, best_index, ping_ms, start_watcher=True):
         if self.use_tun and not appcore.is_windows_admin():
             self.is_running = False
@@ -1608,27 +1593,16 @@ class GibVPNApp(QMainWindow):
                 )
                 return
         use_zap = getattr(self, "use_zapret", False)
-        warp_transit_server = self._find_warp_transit_server(best_server)
         tun_server_address = (
             builder.resolved_server_address(best_server)
             if self.connection_mode == "tun" else ""
-        )
-        warp_transit_address = (
-            builder.resolved_server_address(warp_transit_server)
-            if self.connection_mode == "tun" and warp_transit_server else ""
         )
         builder.generate_final_config(
             best_server,
             use_zapret=use_zap,
             block_quic=getattr(self, "block_quic", True),
             resolve_endpoints=self.use_tun,
-            warp_transit_server=warp_transit_server,
         )
-        if warp_transit_server:
-            self.log(
-                "[WARP] Cloudflare transit: "
-                f"{warp_transit_server.get('remark') or builder.server_key(warp_transit_server)}"
-            )
 
         vpn_host = builder.server_address(best_server)
         if use_zap and getattr(self, "zapret_dir", None):
@@ -1646,10 +1620,12 @@ class GibVPNApp(QMainWindow):
             time.sleep(0.2)
 
         self.xray_process = self._spawn_xray()
-        if not appcore.wait_for_local_port(10808):
+        if self.xray_process.poll() is not None or not appcore.wait_for_local_port(builder.SOCKS_PORT):
             self._reap_xray(self.xray_process)
             self.xray_process = None
-            raise RuntimeError("Xray запустился, но локальный VPN-порт 10808 не открылся")
+            raise RuntimeError(
+                f"Xray не открыл собственный локальный порт {builder.SOCKS_PORT}"
+            )
         if self.connection_mode == "tun":
             # Defensive cleanup for settings created by builds where proxy and
             # TUN could accidentally be active at the same time.
@@ -1660,10 +1636,7 @@ class GibVPNApp(QMainWindow):
             if appcore.recover_antigravity_proxy():
                 self.log("[SYSTEM] Перед запуском TUN убран отдельный прокси Antigravity")
             try:
-                exclusions = [
-                    address for address in
-                    (tun_server_address, warp_transit_address) if address
-                ]
+                exclusions = [tun_server_address] if tun_server_address else []
                 self.tun_process = self._spawn_tun(exclusions)
                 self.log("[TUN] Полный VPN включён: весь TCP/UDP и DNS идут через VPN")
                 forced = builder.read_process_route_matchers("vpn_apps.txt")
@@ -1690,7 +1663,7 @@ class GibVPNApp(QMainWindow):
                     )
                 if appcore.enable_antigravity_proxy():
                     self.log("[SYSTEM] Весь трафик Antigravity направлен через отдельный WARP-канал")
-                self.log("[SYSTEM] Прокси Windows включён: 127.0.0.1:10809")
+                self.log(f"[SYSTEM] Прокси Windows включён: 127.0.0.1:{builder.HTTP_PORT}")
                 self.log("[SYSTEM] Фоновые приложения направлены через локальный VPN-прокси")
             except OSError as exc:
                 self.log(f"[SYSTEM] Не удалось включить прокси Windows: {exc}")
@@ -1702,8 +1675,8 @@ class GibVPNApp(QMainWindow):
                 daemon=True,
             ).start()
         self.log(f"[CORE] Final xray PID: {self.xray_process.pid}")
-        self.log(f"[CORE] SOCKS inbound: 127.0.0.1:10808")
-        self.log(f"[CORE] HTTP inbound: 127.0.0.1:10809")
+        self.log(f"[CORE] SOCKS inbound: 127.0.0.1:{builder.SOCKS_PORT}")
+        self.log(f"[CORE] HTTP inbound: 127.0.0.1:{builder.HTTP_PORT}")
         if builder.get_warp_settings():
             self.log("[ROUTING] ChatGPT/OpenAI -> personal WARP -> selected VPN server")
             self.log("[ROUTING] Antigravity (all processes) -> personal WARP -> selected VPN server")

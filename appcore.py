@@ -258,6 +258,29 @@ def wait_for_local_port(port, host="127.0.0.1", timeout=5.0):
     return False
 
 
+def find_free_local_port_block():
+    """Reserve a collision-free Xray listener block without killing other VPNs."""
+    import socket
+
+    for base in (10808, 11808, 12808, 13808, 20808, 21808, 30808):
+        ports = (base, base + 1, base + 2, base + 3, base + 77)
+        sockets = []
+        try:
+            for port in ports:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sockets.append(sock)
+                if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                sock.bind(("127.0.0.1", port))
+            return base
+        except OSError:
+            pass
+        finally:
+            for sock in sockets:
+                sock.close()
+    raise RuntimeError("Не найден свободный набор локальных портов для Xray")
+
+
 def verify_tun_connectivity(timeout=8):
     """Probe the new system route from a child process captured by the TUN."""
     import subprocess
@@ -419,9 +442,29 @@ def restore_windows_system_proxy(snapshot):
                     pass
 
 
-def enable_windows_system_proxy(server="127.0.0.1:10809"):
+def configure_local_proxy_ports(base_port):
+    global LOCAL_HTTP_PROXY_URL, LOCAL_ANTIGRAVITY_PROXY_URL
+    LOCAL_HTTP_PROXY_URL = f"http://127.0.0.1:{int(base_port) + 1}"
+    LOCAL_ANTIGRAVITY_PROXY_URL = f"http://127.0.0.1:{int(base_port) + 3}"
+
+
+def _is_gibvpn_local_proxy(value, offsets=(1, 3)):
+    """Recognize a proxy from any port block used by an earlier run."""
+    text = str(value or "").removeprefix("http://")
+    if not text.startswith("127.0.0.1:"):
+        return False
+    try:
+        port = int(text.rsplit(":", 1)[1])
+    except (ValueError, IndexError):
+        return False
+    bases = (10808, 11808, 12808, 13808, 20808, 21808, 30808)
+    return any(port == base + offset for base in bases for offset in offsets)
+
+
+def enable_windows_system_proxy(server=None):
     """Enable a user-level Windows proxy and return its restorable old state."""
     import winreg
+    server = server or LOCAL_HTTP_PROXY_URL.removeprefix("http://")
     snapshot = read_windows_system_proxy()
     key_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
@@ -461,8 +504,12 @@ def recover_windows_system_proxy():
         with open(SYSTEM_PROXY_BACKUP_PATH, "r", encoding="utf-8") as handle:
             snapshot = json.load(handle)
         current = read_windows_system_proxy()
-        is_ours = (current.get("ProxyEnable", {}).get("value") == 1 and
-                   current.get("ProxyServer", {}).get("value") == "127.0.0.1:10809")
+        is_ours = (
+            current.get("ProxyEnable", {}).get("value") == 1
+            and _is_gibvpn_local_proxy(
+                current.get("ProxyServer", {}).get("value"), offsets=(1,)
+            )
+        )
         if is_ours:
             restore_windows_system_proxy(snapshot)
         clear_windows_system_proxy_backup()
@@ -531,9 +578,10 @@ def restore_user_environment_proxy(snapshot):
     _broadcast_environment_change()
 
 
-def enable_user_environment_proxy(proxy_url=LOCAL_HTTP_PROXY_URL):
+def enable_user_environment_proxy(proxy_url=None):
     """Cover apps (including Antigravity) that ignore Windows Internet Settings."""
     import winreg
+    proxy_url = proxy_url or LOCAL_HTTP_PROXY_URL
     snapshot = read_user_environment_proxy()
     previous_no_proxy = str(snapshot.get("NO_PROXY", {}).get("value", "") or "")
     exclusions = [part.strip() for part in previous_no_proxy.split(",") if part.strip()]
@@ -581,7 +629,7 @@ def recover_user_environment_proxy():
             snapshot = json.load(handle)
         current = read_user_environment_proxy()
         is_ours = all(
-            current.get(name, {}).get("value") == LOCAL_HTTP_PROXY_URL
+            _is_gibvpn_local_proxy(current.get(name, {}).get("value"), offsets=(1,))
             for name in ("HTTP_PROXY", "HTTPS_PROXY")
         )
         if is_ours:
@@ -592,7 +640,7 @@ def recover_user_environment_proxy():
         return False
 
 
-def enable_antigravity_proxy(proxy_url=LOCAL_ANTIGRAVITY_PROXY_URL):
+def enable_antigravity_proxy(proxy_url=None):
     """Set Antigravity's explicit backend proxy while preserving user settings.
 
     Its model language server does not consistently inherit Explorer's updated
@@ -600,6 +648,7 @@ def enable_antigravity_proxy(proxy_url=LOCAL_ANTIGRAVITY_PROXY_URL):
     value is consumed by that backend and is therefore required in proxy mode.
     """
     import json
+    proxy_url = proxy_url or LOCAL_ANTIGRAVITY_PROXY_URL
 
     settings_dir = os.path.dirname(ANTIGRAVITY_SETTINGS_PATH)
     if not os.path.isdir(os.path.dirname(settings_dir)):
@@ -650,8 +699,8 @@ def recover_antigravity_proxy():
             snapshot = json.load(handle)
         with open(ANTIGRAVITY_SETTINGS_PATH, "r", encoding="utf-8-sig") as handle:
             settings = json.load(handle)
-        if (isinstance(settings, dict) and settings.get("http.proxy") in {
-                LOCAL_HTTP_PROXY_URL, LOCAL_ANTIGRAVITY_PROXY_URL}):
+        if (isinstance(settings, dict) and
+                _is_gibvpn_local_proxy(settings.get("http.proxy"))):
             for name in ("http.proxy", "http.proxySupport"):
                 item = snapshot.get(name, {"exists": False})
                 if item.get("exists"):
@@ -1006,8 +1055,7 @@ def get_latest_github_zapret_info():
 
     proxy_options = [
         None,
-        {"http": "http://127.0.0.1:10809", "https": "http://127.0.0.1:10809"},
-        {"http": "socks5://127.0.0.1:10808", "https": "socks5://127.0.0.1:10808"}
+        {"http": LOCAL_HTTP_PROXY_URL, "https": LOCAL_HTTP_PROXY_URL},
     ]
 
     env_proxies = {k: os.environ.pop(k) for k in list(os.environ.keys()) if "proxy" in k.lower()}
@@ -1068,8 +1116,7 @@ def download_zapret_github_update(zapret_dir, target_version=None):
 
     proxy_options = [
         None,
-        {"http": "http://127.0.0.1:10809", "https": "http://127.0.0.1:10809"},
-        {"http": "socks5://127.0.0.1:10808", "https": "socks5://127.0.0.1:10808"}
+        {"http": LOCAL_HTTP_PROXY_URL, "https": LOCAL_HTTP_PROXY_URL},
     ]
 
     for u in urls_to_try:
@@ -1186,7 +1233,7 @@ def emergency_fix_internet():
     return True, log_lines
 
 
-CURRENT_APP_VERSION = "3.0.23"
+CURRENT_APP_VERSION = "3.0.24"
 
 
 def is_newer_version(candidate, current):
@@ -1215,8 +1262,7 @@ def get_latest_github_app_info(repo=None):
 
     proxy_options = [
         None,
-        {"http": "http://127.0.0.1:10809", "https": "http://127.0.0.1:10809"},
-        {"http": "socks5://127.0.0.1:10808", "https": "socks5://127.0.0.1:10808"}
+        {"http": LOCAL_HTTP_PROXY_URL, "https": LOCAL_HTTP_PROXY_URL},
     ]
 
     env_proxies = {k: os.environ.pop(k) for k in list(os.environ.keys()) if "proxy" in k.lower()}
@@ -1290,8 +1336,7 @@ def download_github_app_asset(
     }
     proxy_options = [
         None,
-        {"http": "http://127.0.0.1:10809", "https": "http://127.0.0.1:10809"},
-        {"http": "socks5://127.0.0.1:10808", "https": "socks5://127.0.0.1:10808"},
+        {"http": LOCAL_HTTP_PROXY_URL, "https": LOCAL_HTTP_PROXY_URL},
     ]
 
     try:

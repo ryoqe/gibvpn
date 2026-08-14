@@ -11,9 +11,24 @@ import socket
 from appcore import WORK_DIR
 
 # Loopback port of the Xray API inbound (StatsService) in the final config.
+SOCKS_PORT = 10808
+HTTP_PORT = 10809
+WARP_SOCKS_PORT = 10810
+WARP_HTTP_PORT = 10811
 XRAY_API_PORT = 10085
 SINGBOX_TUN_CONFIG = "singbox_tun.json"
 TUN_MTU = 1500
+
+
+def configure_local_ports(base_port):
+    """Set the private listener block selected before Xray starts."""
+    global SOCKS_PORT, HTTP_PORT, WARP_SOCKS_PORT, WARP_HTTP_PORT, XRAY_API_PORT
+    base_port = int(base_port)
+    SOCKS_PORT = base_port
+    HTTP_PORT = base_port + 1
+    WARP_SOCKS_PORT = base_port + 2
+    WARP_HTTP_PORT = base_port + 3
+    XRAY_API_PORT = base_port + 77
 
 # ChatGPT uses more than one first-party hostname.  Keep this list in one
 # place so routing rules and diagnostics describe the same traffic class.
@@ -520,7 +535,7 @@ def save_decoded_subscription(url, output_file="decoded_sub.txt"):
                 r = requests.get(
                     url,
                     headers=headers,
-                    proxies={"http": "http://127.0.0.1:10809", "https": "http://127.0.0.1:10809"},
+                    proxies={"http": f"http://127.0.0.1:{HTTP_PORT}", "https": f"http://127.0.0.1:{HTTP_PORT}"},
                     timeout=20
                 )
                 r.raise_for_status()
@@ -893,7 +908,7 @@ def _pin_wireguard_endpoint(warp_settings):
 
 def generate_final_config(
     best_server, use_zapret=False, block_quic=True,
-    resolve_endpoints=False, warp_transit_server=None,
+    resolve_endpoints=False,
 ):
     direct_domains = [
         "domain:ru", "domain:рф", "domain:xn--p1ai",
@@ -994,13 +1009,6 @@ def generate_final_config(
         if resolve_endpoints else copy.deepcopy(best_server)
     )
     best_server["tag"] = "best-proxy"
-    warp_transit = None
-    if warp_transit_server:
-        warp_transit = (
-            _pin_server_endpoint(warp_transit_server)
-            if resolve_endpoints else copy.deepcopy(warp_transit_server)
-        )
-        warp_transit["tag"] = "warp-transit"
     warp_settings = get_warp_settings()
     if warp_settings and resolve_endpoints:
         warp_settings = _pin_wireguard_endpoint(warp_settings)
@@ -1011,17 +1019,11 @@ def generate_final_config(
         {"tag": "blocked", "protocol": "blackhole"},
         {"tag": "api", "protocol": "freedom"}
     ]
-    if warp_transit:
-        outbounds.insert(1, warp_transit)
     if warp_settings:
         outbounds.insert(1, {
             "tag": "warp-proxy", "protocol": "wireguard",
             "settings": warp_settings,
-            # A dedicated supported-country transit prevents Cloudflare
-            # anycast from returning Google AI traffic to a rejected colo.
-            "streamSettings": {"sockopt": {
-                "dialerProxy": "warp-transit" if warp_transit else "best-proxy"
-            }},
+            "streamSettings": {"sockopt": {"dialerProxy": "best-proxy"}},
         })
 
     rules = [
@@ -1095,7 +1097,7 @@ def generate_final_config(
         "inbounds": [
             {
                 "tag": "socks-in",
-                "port": 10808,
+                "port": SOCKS_PORT,
                 "listen": "127.0.0.1",
                 "protocol": "socks",
                 "settings": {"udp": True},
@@ -1110,7 +1112,7 @@ def generate_final_config(
             },
             {
                 "tag": "http-in",
-                "port": 10809,
+                "port": HTTP_PORT,
                 "listen": "127.0.0.1",
                 "protocol": "http",
                 "sniffing": {
@@ -1121,7 +1123,7 @@ def generate_final_config(
             },
             {
                 "tag": "warp-socks-in",
-                "port": 10810,
+                "port": WARP_SOCKS_PORT,
                 "listen": "127.0.0.1",
                 "protocol": "socks",
                 "settings": {"udp": True},
@@ -1133,7 +1135,7 @@ def generate_final_config(
             },
             {
                 "tag": "warp-http-in",
-                "port": 10811,
+                "port": WARP_HTTP_PORT,
                 "listen": "127.0.0.1",
                 "protocol": "http",
                 "sniffing": {
@@ -1223,14 +1225,14 @@ def generate_tun_config(route_exclude_addresses=None):
             "stack": "system",
         }],
         "outbounds": [
-            {"type": "socks", "tag": "xray-out", "server": "127.0.0.1", "server_port": 10808},
+            {"type": "socks", "tag": "xray-out", "server": "127.0.0.1", "server_port": SOCKS_PORT},
             {
                 # Xray routes this local entry through WARP. It is selected
                 # only by the Antigravity process rule below.
                 "type": "socks",
                 "tag": "xray-warp-out",
                 "server": "127.0.0.1",
-                "server_port": 10810,
+                "server_port": WARP_SOCKS_PORT,
             },
             {"type": "direct", "tag": "direct"},
         ],
