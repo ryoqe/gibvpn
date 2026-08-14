@@ -42,7 +42,6 @@ GPT_DOMAINS = [
 # failure incorrectly tears down a healthy base Xray connection.
 BASE_HEALTH_DOMAINS = [
     "full:cp.cloudflare.com",
-    "full:www.google.com",
     "full:connectivitycheck.gstatic.com",
 ]
 
@@ -842,6 +841,9 @@ def generate_final_config(
     warp_domains = [
         "geosite:google-gemini",
         "geosite:openai",
+        # Gemini authentication and frontend calls move between shared Google
+        # domains. They must keep one WARP exit IP for the whole session.
+        "geosite:google",
         "domain:ai.com",
         "domain:gemini.com",
         "domain:gemini.google.com",
@@ -858,7 +860,10 @@ def generate_final_config(
         "domain:proactivebackend-pa.googleapis.com",
         "domain:robinfrontend-pa.googleapis.com",
         "domain:kimi.com",
+        "domain:goog",
         "domain:antigravity-unleash.goog",
+        "domain:googleapis.com",
+        "domain:google.com",
         *GPT_DOMAINS,
     ]
     wd_file = _find_file_path('warp_domains.txt')
