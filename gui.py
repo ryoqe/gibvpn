@@ -1085,10 +1085,11 @@ class GibVPNApp(QMainWindow):
             self.log(f"[CORE] Testing favorite servers first")
             fav_results = self._run_ping_test(favorite_pairs)
             if fav_results:
-                fav_results.sort(key=lambda x: x[1])
-                best_index, best_ping = fav_results[0]
-                best_server = servers[best_index]
-                self.log(f"[CORE] Best favorite server: #{best_index}, {int(best_ping * 1000)}ms")
+                choice = self._pick_gemini_compatible_ping(fav_results, servers)
+                if choice:
+                    best_index, best_ping = choice
+                    best_server = servers[best_index]
+                    self.log(f"[CORE] Best favorite server: #{best_index}, {int(best_ping * 1000)}ms")
 
         if best_server is None and regular_pairs:
             if favorite_pairs:
@@ -1096,11 +1097,12 @@ class GibVPNApp(QMainWindow):
             self.set_status(f"TESTING {len(regular_pairs)} REGULAR SERVERS...", "orange")
             reg_results = self._run_ping_test(regular_pairs)
             if reg_results:
-                reg_results.sort(key=lambda x: x[1])
-                best_index, best_ping = reg_results[0]
-                best_server = servers[best_index]
-                source = "regular"
-                self.log(f"[CORE] Best regular server: #{best_index}, {int(best_ping * 1000)}ms")
+                choice = self._pick_gemini_compatible_ping(reg_results, servers)
+                if choice:
+                    best_index, best_ping = choice
+                    best_server = servers[best_index]
+                    source = "regular"
+                    self.log(f"[CORE] Best regular server: #{best_index}, {int(best_ping * 1000)}ms")
 
         if best_server is None:
             self.set_status("ALL SERVERS ARE DEAD!", "red")
@@ -1269,6 +1271,9 @@ class GibVPNApp(QMainWindow):
 
         for orig_i, srv in candidates:
             try:
+                if not self._gemini_route_works(srv):
+                    self.log(f"[AI] Server #{orig_i} skipped: its normal WARP route is rejected by Google")
+                    continue
                 builder.generate_final_config(srv, use_zapret=False, block_quic=True)
                 proc = self._spawn_xray(is_test=True)
                 time.sleep(0.3)
@@ -1286,8 +1291,11 @@ class GibVPNApp(QMainWindow):
                 self.log(f"[SPEED] Server #{orig_i} test failed: {e}")
 
         if best_server is None:
-            best_index, best_server = candidates[0]
-            best_bps = 0.0
+            self.set_status("NO GEMINI-COMPATIBLE SERVERS", "red")
+            self.log("[AI] No candidate passed the normal server -> WARP Gemini check.")
+            self.is_running = False
+            self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
+            return
 
         self.log(f"[SPEED] Winner: #{best_index} ({builder.fmt_speed(best_bps)})")
         self._start_best_server(best_server, best_index, 0)
@@ -1344,8 +1352,21 @@ class GibVPNApp(QMainWindow):
             self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
             return
 
-        avail_results.sort(key=lambda x: (-x[1], x[2]))
-        top_candidates = avail_results[:3]
+        # Keep the same generic chain for every finalist.  Availability ranks
+        # candidates first; this filter prevents the Auto mode from later
+        # replacing the confirmed WARP route with a Google-blocked one.
+        top_candidates = []
+        for result in sorted(avail_results, key=lambda x: (-x[1], x[2])):
+            if self._gemini_route_works(servers[result[0]]):
+                top_candidates.append(result)
+                if len(top_candidates) == 3:
+                    break
+        if not top_candidates:
+            self.set_status("NO GEMINI-COMPATIBLE SERVERS", "red")
+            self.log("[AI] No candidate passed the normal server -> WARP Gemini check.")
+            self.is_running = False
+            self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
+            return
 
         best_idx = None
         best_server = None
@@ -1486,6 +1507,16 @@ class GibVPNApp(QMainWindow):
             index = result[0]
             server = servers[index]
             if self._gemini_route_works(server):
+                self.log(f"[AI] Gemini-compatible server: #{index}")
+                return result
+            self.log(f"[AI] Server #{index} is reachable, but Google rejected its WARP exit")
+        return None
+
+    def _pick_gemini_compatible_ping(self, results, servers):
+        """Return the lowest-latency server with a usable generic WARP path."""
+        for result in sorted(results, key=lambda item: item[1]):
+            index = result[0]
+            if self._gemini_route_works(servers[index]):
                 self.log(f"[AI] Gemini-compatible server: #{index}")
                 return result
             self.log(f"[AI] Server #{index} is reachable, but Google rejected its WARP exit")
