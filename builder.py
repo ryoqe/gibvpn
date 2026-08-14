@@ -52,6 +52,14 @@ GPT_DOMAINS = [
     "full:humb.apple.com",
 ]
 
+# NotebookLM is available through the Swiss VPN exit, but Google currently
+# returns ``location=unsupported`` for the WARP exit used by Gemini.  Keep it
+# encrypted inside the selected VPN while deliberately avoiding that WARP hop.
+NOTEBOOK_DOMAINS = [
+    "domain:notebooklm.google.com",
+    "domain:notebook.google.com",
+]
+
 # These requests judge whether the selected VPN server itself is alive.  They
 # must never go through optional WARP, otherwise a temporary Cloudflare/WARP
 # failure incorrectly tears down a healthy base Xray connection.
@@ -1052,7 +1060,17 @@ def generate_final_config(
         },
     ]
 
-    # Xray uses the first matching route.  Put protected AI destinations
+    # Xray uses the first matching route. NotebookLM is the exception: it
+    # must stay in the selected VPN country rather than inherit Gemini's
+    # WARP exit, which Google currently marks unsupported.
+    rules.append({
+        "type": "field",
+        "inboundTag": ["socks-in", "http-in"],
+        "outboundTag": "best-proxy",
+        "domain": NOTEBOOK_DOMAINS,
+    })
+
+    # Put protected AI destinations
     # before user "direct" exceptions: a broad exception such as
     # ``domain:google`` must not silently bypass WARP for Gemini, NotebookLM
     # or Antigravity.
