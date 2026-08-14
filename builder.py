@@ -722,6 +722,25 @@ def read_process_route_matchers(filename):
         normalized = os.path.normpath(value) if target is paths else value
         if normalized.casefold() not in {item.casefold() for item in target}:
             target.append(normalized)
+
+    # Some desktop clients are a family of executables. Treating steam.exe as
+    # only one process leaves its store/login/download helpers on another IP.
+    companions = {
+        "steam.exe": (
+            "steamwebhelper.exe",
+            "steamservice.exe",
+            "GameOverlayUI.exe",
+            "streaming_client.exe",
+        ),
+    }
+    listed_names = {item.casefold() for item in names}
+    listed_names.update(os.path.basename(item).casefold() for item in paths)
+    for parent_name, child_names in companions.items():
+        if parent_name.casefold() not in listed_names:
+            continue
+        for child_name in child_names:
+            if child_name.casefold() not in {item.casefold() for item in names}:
+                names.append(child_name)
     return {"process_name": names, "process_path": paths}
 
 
