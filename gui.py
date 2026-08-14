@@ -1085,7 +1085,7 @@ class GibVPNApp(QMainWindow):
             self.log(f"[CORE] Testing favorite servers first")
             fav_results = self._run_ping_test(favorite_pairs)
             if fav_results:
-                choice = self._pick_gemini_compatible_ping(fav_results, servers)
+                choice = self._pick_ai_compatible_ping(fav_results, servers)
                 if choice:
                     best_index, best_ping = choice
                     best_server = servers[best_index]
@@ -1097,7 +1097,7 @@ class GibVPNApp(QMainWindow):
             self.set_status(f"TESTING {len(regular_pairs)} REGULAR SERVERS...", "orange")
             reg_results = self._run_ping_test(regular_pairs)
             if reg_results:
-                choice = self._pick_gemini_compatible_ping(reg_results, servers)
+                choice = self._pick_ai_compatible_ping(reg_results, servers)
                 if choice:
                     best_index, best_ping = choice
                     best_server = servers[best_index]
@@ -1178,14 +1178,14 @@ class GibVPNApp(QMainWindow):
             self.log(f"[CORE] Testing favorite servers first")
             fav_results = self._run_availability_test(favorite_pairs)
             if fav_results:
-                choice = self._pick_gemini_compatible(fav_results, servers)
+                choice = self._pick_ai_compatible(fav_results, servers)
                 if choice:
                     best_index, best_count, best_ping = choice
                     best_server = servers[best_index]
                     best_metric = (best_count, best_ping)
                     self.log(f"[CORE] Best favorite server: #{best_index}, {best_count}/{len(self.check_sites)} sites, avg {int(best_ping * 1000)}ms")
                 else:
-                    self.log("[AI] No favorite server passed the Gemini/WARP check; trying regular servers")
+                    self.log("[AI] No favorite server passed the Google AI/WARP check; trying regular servers")
 
         if best_server is None and regular_pairs:
             if favorite_pairs:
@@ -1193,7 +1193,7 @@ class GibVPNApp(QMainWindow):
             self.set_status(f"TESTING {len(regular_pairs)} REGULAR SERVERS...", "orange")
             reg_results = self._run_availability_test(regular_pairs)
             if reg_results:
-                choice = self._pick_gemini_compatible(reg_results, servers)
+                choice = self._pick_ai_compatible(reg_results, servers)
                 if choice:
                     best_index, best_count, best_ping = choice
                     best_server = servers[best_index]
@@ -1271,8 +1271,8 @@ class GibVPNApp(QMainWindow):
 
         for orig_i, srv in candidates:
             try:
-                if not self._gemini_route_works(srv):
-                    self.log(f"[AI] Server #{orig_i} skipped: its normal WARP route is rejected by Google")
+                if not self._ai_route_works(srv):
+                    self.log(f"[AI] Server #{orig_i} skipped: its normal WARP route is rejected by a Google AI service")
                     continue
                 builder.generate_final_config(srv, use_zapret=False, block_quic=True)
                 proc = self._spawn_xray(is_test=True)
@@ -1291,8 +1291,8 @@ class GibVPNApp(QMainWindow):
                 self.log(f"[SPEED] Server #{orig_i} test failed: {e}")
 
         if best_server is None:
-            self.set_status("NO GEMINI-COMPATIBLE SERVERS", "red")
-            self.log("[AI] No candidate passed the normal server -> WARP Gemini check.")
+            self.set_status("NO AI-COMPATIBLE SERVERS", "red")
+            self.log("[AI] No candidate passed the normal server -> WARP Google AI check.")
             self.is_running = False
             self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
             return
@@ -1357,13 +1357,13 @@ class GibVPNApp(QMainWindow):
         # replacing the confirmed WARP route with a Google-blocked one.
         top_candidates = []
         for result in sorted(avail_results, key=lambda x: (-x[1], x[2])):
-            if self._gemini_route_works(servers[result[0]]):
+            if self._ai_route_works(servers[result[0]]):
                 top_candidates.append(result)
                 if len(top_candidates) == 3:
                     break
         if not top_candidates:
-            self.set_status("NO GEMINI-COMPATIBLE SERVERS", "red")
-            self.log("[AI] No candidate passed the normal server -> WARP Gemini check.")
+            self.set_status("NO AI-COMPATIBLE SERVERS", "red")
+            self.log("[AI] No candidate passed the normal server -> WARP Google AI check.")
             self.is_running = False
             self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
             return
@@ -1457,8 +1457,8 @@ class GibVPNApp(QMainWindow):
             avg_ping = sum(pings) / len(pings)
             result_list.append((index, reachable, avg_ping))
 
-    def _gemini_route_works(self, server):
-        """Check a server's normal ``server -> personal WARP`` path.
+    def _ai_route_works(self, server):
+        """Check a server's normal ``server -> personal WARP`` AI path.
 
         A TCP connection or HTTP 200 alone is not enough: Google may return a
         country stub or its ``/sorry`` anti-bot page with a successful status.
@@ -1475,51 +1475,59 @@ class GibVPNApp(QMainWindow):
                 return False
             session = requests.Session()
             session.trust_env = False
-            response = session.get(
-                "https://gemini.google.com/",
-                proxies={
-                    "http": f"socks5h://127.0.0.1:{builder.WARP_SOCKS_PORT}",
-                    "https": f"socks5h://127.0.0.1:{builder.WARP_SOCKS_PORT}",
-                },
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=(4, 12),
-                allow_redirects=True,
-            )
-            text = (response.text or "").casefold()
-            final_url = (response.url or "").casefold()
-            blocked = (
-                "google.com/sorry" in final_url
-                or "location=unsupported" in final_url
-                or "isn't currently supported in your country" in text
-                or "not available in your country" in text
-                or "location=unsupported" in text
-            )
-            return response.status_code < 400 and not blocked
+            proxies = {
+                "http": f"socks5h://127.0.0.1:{builder.WARP_SOCKS_PORT}",
+                "https": f"socks5h://127.0.0.1:{builder.WARP_SOCKS_PORT}",
+            }
+            # Gemini and NotebookLM have different country allow-lists. A
+            # route that opens Gemini but receives NotebookLM's
+            # ``location=unsupported`` page is not a working AI route.
+            for service, url in (
+                ("Gemini", "https://gemini.google.com/"),
+                ("NotebookLM", "https://notebooklm.google.com/"),
+            ):
+                response = session.get(
+                    url, proxies=proxies, headers={"User-Agent": "Mozilla/5.0"},
+                    timeout=(4, 12), allow_redirects=True,
+                )
+                text = (response.text or "").casefold()
+                final_url = (response.url or "").casefold()
+                blocked = (
+                    "google.com/sorry" in final_url
+                    or "location=unsupported" in final_url
+                    or "isn't currently supported in your country" in text
+                    or "not available in your country" in text
+                    or "location=unsupported" in text
+                )
+                if response.status_code >= 400 or blocked:
+                    self.log(f"[AI] {service} rejected the current WARP exit")
+                    return False
+            return True
         except Exception:
             return False
         finally:
             if proc:
                 self._reap_xray(proc)
 
-    def _pick_gemini_compatible(self, results, servers):
-        """Return the best tested candidate whose WARP route is usable."""
+    def _pick_ai_compatible(self, results, servers):
+        """Return the best candidate whose generic WARP route serves Google AI."""
         for result in sorted(results, key=lambda item: (-item[1], item[2])):
             index = result[0]
             server = servers[index]
-            if self._gemini_route_works(server):
-                self.log(f"[AI] Gemini-compatible server: #{index}")
+            if self._ai_route_works(server):
+                self.log(f"[AI] Google AI-compatible server: #{index}")
                 return result
-            self.log(f"[AI] Server #{index} is reachable, but Google rejected its WARP exit")
+            self.log(f"[AI] Server #{index} is reachable, but its WARP exit is unsuitable for Google AI")
         return None
 
-    def _pick_gemini_compatible_ping(self, results, servers):
+    def _pick_ai_compatible_ping(self, results, servers):
         """Return the lowest-latency server with a usable generic WARP path."""
         for result in sorted(results, key=lambda item: item[1]):
             index = result[0]
-            if self._gemini_route_works(servers[index]):
-                self.log(f"[AI] Gemini-compatible server: #{index}")
+            if self._ai_route_works(servers[index]):
+                self.log(f"[AI] Google AI-compatible server: #{index}")
                 return result
-            self.log(f"[AI] Server #{index} is reachable, but Google rejected its WARP exit")
+            self.log(f"[AI] Server #{index} is reachable, but its WARP exit is unsuitable for Google AI")
         return None
 
     def _run_ping_test(self, servers_with_index, kill_existing=True):
