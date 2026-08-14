@@ -1663,7 +1663,7 @@ class GibVPNApp(QMainWindow):
                         self._environment_proxy_snapshot
                     )
                 if appcore.enable_antigravity_proxy():
-                    self.log("[SYSTEM] Модельный процесс Antigravity направлен через VPN")
+                    self.log("[SYSTEM] Весь трафик Antigravity направлен через отдельный WARP-канал")
                 self.log("[SYSTEM] Прокси Windows включён: 127.0.0.1:10809")
                 self.log("[SYSTEM] Фоновые приложения направлены через локальный VPN-прокси")
             except OSError as exc:
@@ -1680,6 +1680,7 @@ class GibVPNApp(QMainWindow):
         self.log(f"[CORE] HTTP inbound: 127.0.0.1:10809")
         if builder.get_warp_settings():
             self.log("[ROUTING] ChatGPT/OpenAI -> personal WARP -> selected VPN server")
+            self.log("[ROUTING] Antigravity (all processes) -> personal WARP -> selected VPN server")
         else:
             self.log("[ROUTING] ChatGPT/OpenAI -> selected VPN server (WARP profile not imported)")
         self._conn_name = (best_server.get("remark") or "").strip() or f"Server {best_index}"

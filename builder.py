@@ -920,6 +920,14 @@ def generate_final_config(
 
     rules = [
         {"type": "field", "outboundTag": "api", "inboundTag": ["api-in"]},
+        {
+            # This inbound is reserved for Antigravity. Match it before every
+            # domain/direct rule so all requests keep one WARP exit address.
+            "type": "field",
+            "inboundTag": ["warp-socks-in", "warp-http-in"],
+            "outboundTag": "warp-proxy" if warp_settings else "best-proxy",
+            "network": "tcp,udp",
+        },
     ]
 
     # Xray uses the first matching route.  Put protected AI destinations
@@ -1006,6 +1014,29 @@ def generate_final_config(
                 },
             },
             {
+                "tag": "warp-socks-in",
+                "port": 10810,
+                "listen": "127.0.0.1",
+                "protocol": "socks",
+                "settings": {"udp": True},
+                "sniffing": {
+                    "enabled": True,
+                    "destOverride": ["http", "tls", "quic"],
+                    "routeOnly": True,
+                },
+            },
+            {
+                "tag": "warp-http-in",
+                "port": 10811,
+                "listen": "127.0.0.1",
+                "protocol": "http",
+                "sniffing": {
+                    "enabled": True,
+                    "destOverride": ["http", "tls"],
+                    "routeOnly": True,
+                },
+            },
+            {
                 "tag": "api-in",
                 "port": XRAY_API_PORT,
                 "listen": "127.0.0.1",
@@ -1076,6 +1107,14 @@ def generate_tun_config(route_exclude_addresses=None):
         }],
         "outbounds": [
             {"type": "socks", "tag": "xray-out", "server": "127.0.0.1", "server_port": 10808},
+            {
+                # Xray routes this local entry through WARP. It is selected
+                # only by the Antigravity process rule below.
+                "type": "socks",
+                "tag": "xray-warp-out",
+                "server": "127.0.0.1",
+                "server_port": 10810,
+            },
             {"type": "direct", "tag": "direct"},
         ],
         "route": {
@@ -1087,6 +1126,18 @@ def generate_tun_config(route_exclude_addresses=None):
                     # classified the first UDP packet yet.
                     "port": 53,
                     "action": "hijack-dns",
+                },
+                {
+                    # Model backends add and rotate hosts, so domain lists are
+                    # not enough. Bind all known Antigravity components.
+                    "process_name": [
+                        "Antigravity.exe",
+                        "language_server.exe",
+                        "agy.exe",
+                        "agy-node.exe",
+                    ],
+                    "action": "route",
+                    "outbound": "xray-warp-out",
                 },
                 {
                     # Without this rule Xray's connection to the remote VPN

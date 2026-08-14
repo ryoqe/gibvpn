@@ -378,6 +378,7 @@ SYSTEM_PROXY_BACKUP_PATH = os.path.join(APP_DIR, "system_proxy_backup.json")
 ENVIRONMENT_PROXY_VALUES = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
 ENVIRONMENT_PROXY_BACKUP_PATH = os.path.join(APP_DIR, "environment_proxy_backup.json")
 LOCAL_HTTP_PROXY_URL = "http://127.0.0.1:10809"
+LOCAL_ANTIGRAVITY_PROXY_URL = "http://127.0.0.1:10811"
 ANTIGRAVITY_PROXY_BACKUP_PATH = os.path.join(APP_DIR, "antigravity_proxy_backup.json")
 ANTIGRAVITY_SETTINGS_PATH = os.path.join(
     os.environ.get("APPDATA", os.path.expanduser("~")),
@@ -591,7 +592,7 @@ def recover_user_environment_proxy():
         return False
 
 
-def enable_antigravity_proxy(proxy_url=LOCAL_HTTP_PROXY_URL):
+def enable_antigravity_proxy(proxy_url=LOCAL_ANTIGRAVITY_PROXY_URL):
     """Set Antigravity's explicit backend proxy while preserving user settings.
 
     Its model language server does not consistently inherit Explorer's updated
@@ -649,8 +650,8 @@ def recover_antigravity_proxy():
             snapshot = json.load(handle)
         with open(ANTIGRAVITY_SETTINGS_PATH, "r", encoding="utf-8-sig") as handle:
             settings = json.load(handle)
-        if (isinstance(settings, dict) and
-                settings.get("http.proxy") == LOCAL_HTTP_PROXY_URL):
+        if (isinstance(settings, dict) and settings.get("http.proxy") in {
+                LOCAL_HTTP_PROXY_URL, LOCAL_ANTIGRAVITY_PROXY_URL}):
             for name in ("http.proxy", "http.proxySupport"):
                 item = snapshot.get(name, {"exists": False})
                 if item.get("exists"):
@@ -1185,7 +1186,7 @@ def emergency_fix_internet():
     return True, log_lines
 
 
-CURRENT_APP_VERSION = "3.0.17"
+CURRENT_APP_VERSION = "3.0.18"
 
 
 def is_newer_version(candidate, current):
