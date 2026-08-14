@@ -625,7 +625,15 @@ def get_parsed_servers(sub_file="decoded_sub.txt"):
     return parsed_servers
 
 
-def generate_test_config(parsed_servers, base_port=11000):
+def generate_test_config(parsed_servers, base_port=11000, config_path=None):
+    """Create a disposable Xray configuration for server probes.
+
+    The normal VPN configuration must never be overwritten by a background
+    availability check: Xray keeps the old config in memory, but a later
+    reconnect would otherwise start the probe-only config without WARP rules.
+    ``config_path`` lets the GUI keep probe files separate.  The legacy
+    default is retained for standalone diagnostic scripts.
+    """
     if not parsed_servers:
         return False
 
@@ -661,7 +669,7 @@ def generate_test_config(parsed_servers, base_port=11000):
         }
     }
 
-    config_path = os.path.join(WORK_DIR, 'config.json')
+    config_path = config_path or os.path.join(WORK_DIR, 'config.json')
     with open(config_path, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=2)
 
@@ -903,13 +911,26 @@ def generate_final_config(
 
     rules = [
         {"type": "field", "outboundTag": "api", "inboundTag": ["api-in"]},
-        {
+    ]
+
+    # Xray uses the first matching route.  Put protected AI destinations
+    # before user "direct" exceptions: a broad exception such as
+    # ``domain:google`` must not silently bypass WARP for Gemini, NotebookLM
+    # or Antigravity.
+    if warp_settings:
+        rules.append({
             "type": "field",
             "inboundTag": ["socks-in", "http-in"],
-            "outboundTag": "direct",
-            "domain": direct_domains
-        }
-    ]
+            "outboundTag": "warp-proxy",
+            "domain": warp_domains
+        })
+
+    rules.append({
+        "type": "field",
+        "inboundTag": ["socks-in", "http-in"],
+        "outboundTag": "direct",
+        "domain": direct_domains
+    })
 
     rules.append({
         "type": "field",
@@ -937,13 +958,6 @@ def generate_final_config(
             "network": "udp"
         })
 
-    if warp_settings:
-        rules.append({
-            "type": "field",
-            "inboundTag": ["socks-in", "http-in"],
-            "outboundTag": "warp-proxy",
-            "domain": warp_domains
-        })
     rules.append({
         "type": "field",
         "inboundTag": ["socks-in", "http-in"],

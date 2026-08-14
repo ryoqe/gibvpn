@@ -917,11 +917,11 @@ class GibVPNApp(QMainWindow):
         if self.is_running and self._connected_at:
             self.set_status(self._running_status_text(), "green")
 
-    def _spawn_xray(self, is_test=False):
+    def _spawn_xray(self, is_test=False, config_path=None):
         xray_exe = os.path.join(WORK_DIR, "xray.exe")
         if not os.path.exists(xray_exe):
             xray_exe = "xray.exe"
-        config_path = os.path.join(WORK_DIR, "config.json")
+        config_path = config_path or os.path.join(WORK_DIR, "config.json")
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         proc = subprocess.Popen(
@@ -1431,13 +1431,16 @@ class GibVPNApp(QMainWindow):
         test_servers = [srv for _, srv in servers_with_index]
         base_port = 11000 + (getattr(self, "_test_port_offset", 0) % 10) * 200
         self._test_port_offset = getattr(self, "_test_port_offset", 0) + 1
-        builder.generate_test_config(test_servers, base_port=base_port)
+        test_config_path = os.path.join(WORK_DIR, f"test_config_{base_port}.json")
+        builder.generate_test_config(
+            test_servers, base_port=base_port, config_path=test_config_path
+        )
 
         if kill_existing:
             self.kill_orphaned_xray()
 
         self.log(f"[CORE] Starting ping test for {len(test_servers)} servers (base_port={base_port})...")
-        test_process = self._spawn_xray(is_test=True)
+        test_process = self._spawn_xray(is_test=True, config_path=test_config_path)
         results = []
         try:
             time.sleep(1.5)
@@ -1454,6 +1457,10 @@ class GibVPNApp(QMainWindow):
                         pass
         finally:
             self._reap_xray(test_process)
+            try:
+                os.remove(test_config_path)
+            except OSError:
+                pass
         self.log("[CORE] Ping test xray terminated")
 
         mapped = []
@@ -1469,13 +1476,16 @@ class GibVPNApp(QMainWindow):
         test_servers = [srv for _, srv in servers_with_index]
         base_port = 11000 + (getattr(self, "_test_port_offset", 0) % 10) * 200
         self._test_port_offset = getattr(self, "_test_port_offset", 0) + 1
-        builder.generate_test_config(test_servers, base_port=base_port)
+        test_config_path = os.path.join(WORK_DIR, f"test_config_{base_port}.json")
+        builder.generate_test_config(
+            test_servers, base_port=base_port, config_path=test_config_path
+        )
 
         if kill_existing:
             self.kill_orphaned_xray()
 
         self.log(f"[CORE] Starting availability test for {len(test_servers)} servers (base_port={base_port})...")
-        test_process = self._spawn_xray(is_test=True)
+        test_process = self._spawn_xray(is_test=True, config_path=test_config_path)
         results = []
         try:
             time.sleep(1.5)
@@ -1492,6 +1502,10 @@ class GibVPNApp(QMainWindow):
                         pass
         finally:
             self._reap_xray(test_process)
+            try:
+                os.remove(test_config_path)
+            except OSError:
+                pass
         self.log("[CORE] Availability test xray terminated")
 
         mapped = []
