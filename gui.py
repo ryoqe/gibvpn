@@ -476,10 +476,13 @@ class GibVPNApp(QMainWindow):
         self.btn_speed.setToolTip("Выбрать сервер с наибольшей скоростью скачивания (МБ/с)")
         self.btn_speed.clicked.connect(self.on_speed_clicked)
 
-        self.btn_auto = QPushButton("АВТО", self.bottom_panel)
+        self.btn_auto = QPushButton("ИИ", self.bottom_panel)
         self.btn_auto.setFixedSize(mode_btn_size, mode_btn_size)
         self.btn_auto.setStyleSheet(self._round_btn_style(selected=False))
-        self.btn_auto.setToolTip("Автоматически протестировать пинг, сайты и скорость и выбрать лучший сервер")
+        self.btn_auto.setToolTip(
+            "Подобрать сервер для ИИ: проверить Gemini, NotebookLM, "
+            "доступность сайтов и скорость"
+        )
         self.btn_auto.clicked.connect(self.on_auto_clicked)
 
         self.btn_ping = QPushButton("ПИНГ", self.bottom_panel)
@@ -767,7 +770,7 @@ class GibVPNApp(QMainWindow):
         self.current_mode = "auto"
         self.save_settings()
         self._update_mode_buttons()
-        self.log("Режим VPN: АВТО (комплексный выбор лучшего сервера)")
+        self.log("Режим VPN: ИИ (Gemini, NotebookLM, доступность и скорость)")
         if self.is_running:
             self.stop_vpn()
             self._start_current_mode()
@@ -1085,11 +1088,10 @@ class GibVPNApp(QMainWindow):
             self.log(f"[CORE] Testing favorite servers first")
             fav_results = self._run_ping_test(favorite_pairs)
             if fav_results:
-                choice = self._pick_ai_compatible_ping(fav_results, servers)
-                if choice:
-                    best_index, best_ping = choice
-                    best_server = servers[best_index]
-                    self.log(f"[CORE] Best favorite server: #{best_index}, {int(best_ping * 1000)}ms")
+                fav_results.sort(key=lambda item: item[1])
+                best_index, best_ping = fav_results[0]
+                best_server = servers[best_index]
+                self.log(f"[CORE] Best favorite server: #{best_index}, {int(best_ping * 1000)}ms")
 
         if best_server is None and regular_pairs:
             if favorite_pairs:
@@ -1097,12 +1099,11 @@ class GibVPNApp(QMainWindow):
             self.set_status(f"TESTING {len(regular_pairs)} REGULAR SERVERS...", "orange")
             reg_results = self._run_ping_test(regular_pairs)
             if reg_results:
-                choice = self._pick_ai_compatible_ping(reg_results, servers)
-                if choice:
-                    best_index, best_ping = choice
-                    best_server = servers[best_index]
-                    source = "regular"
-                    self.log(f"[CORE] Best regular server: #{best_index}, {int(best_ping * 1000)}ms")
+                reg_results.sort(key=lambda item: item[1])
+                best_index, best_ping = reg_results[0]
+                best_server = servers[best_index]
+                source = "regular"
+                self.log(f"[CORE] Best regular server: #{best_index}, {int(best_ping * 1000)}ms")
 
         if best_server is None:
             self.set_status("ALL SERVERS ARE DEAD!", "red")
@@ -1178,14 +1179,11 @@ class GibVPNApp(QMainWindow):
             self.log(f"[CORE] Testing favorite servers first")
             fav_results = self._run_availability_test(favorite_pairs)
             if fav_results:
-                choice = self._pick_ai_compatible(fav_results, servers)
-                if choice:
-                    best_index, best_count, best_ping = choice
-                    best_server = servers[best_index]
-                    best_metric = (best_count, best_ping)
-                    self.log(f"[CORE] Best favorite server: #{best_index}, {best_count}/{len(self.check_sites)} sites, avg {int(best_ping * 1000)}ms")
-                else:
-                    self.log("[AI] No favorite server passed the Google AI/WARP check; trying regular servers")
+                fav_results.sort(key=lambda item: (-item[1], item[2]))
+                best_index, best_count, best_ping = fav_results[0]
+                best_server = servers[best_index]
+                best_metric = (best_count, best_ping)
+                self.log(f"[CORE] Best favorite server: #{best_index}, {best_count}/{len(self.check_sites)} sites, avg {int(best_ping * 1000)}ms")
 
         if best_server is None and regular_pairs:
             if favorite_pairs:
@@ -1193,13 +1191,12 @@ class GibVPNApp(QMainWindow):
             self.set_status(f"TESTING {len(regular_pairs)} REGULAR SERVERS...", "orange")
             reg_results = self._run_availability_test(regular_pairs)
             if reg_results:
-                choice = self._pick_ai_compatible(reg_results, servers)
-                if choice:
-                    best_index, best_count, best_ping = choice
-                    best_server = servers[best_index]
-                    best_metric = (best_count, best_ping)
-                    source = "regular"
-                    self.log(f"[CORE] Best regular server: #{best_index}, {best_count}/{len(self.check_sites)} sites, avg {int(best_ping * 1000)}ms")
+                reg_results.sort(key=lambda item: (-item[1], item[2]))
+                best_index, best_count, best_ping = reg_results[0]
+                best_server = servers[best_index]
+                best_metric = (best_count, best_ping)
+                source = "regular"
+                self.log(f"[CORE] Best regular server: #{best_index}, {best_count}/{len(self.check_sites)} sites, avg {int(best_ping * 1000)}ms")
 
         if best_server is None:
             self.set_status("ALL SERVERS ARE DEAD!", "red")
@@ -1271,9 +1268,6 @@ class GibVPNApp(QMainWindow):
 
         for orig_i, srv in candidates:
             try:
-                if not self._ai_route_works(srv):
-                    self.log(f"[AI] Server #{orig_i} skipped: its normal WARP route is rejected by a Google AI service")
-                    continue
                 builder.generate_final_config(srv, use_zapret=False, block_quic=True)
                 proc = self._spawn_xray(is_test=True)
                 time.sleep(0.3)
@@ -1291,11 +1285,8 @@ class GibVPNApp(QMainWindow):
                 self.log(f"[SPEED] Server #{orig_i} test failed: {e}")
 
         if best_server is None:
-            self.set_status("NO AI-COMPATIBLE SERVERS", "red")
-            self.log("[AI] No candidate passed the normal server -> WARP Google AI check.")
-            self.is_running = False
-            self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
-            return
+            best_index, best_server = candidates[0]
+            best_bps = 0.0
 
         self.log(f"[SPEED] Winner: #{best_index} ({builder.fmt_speed(best_bps)})")
         self._start_best_server(best_server, best_index, 0)
@@ -1342,8 +1333,8 @@ class GibVPNApp(QMainWindow):
             self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
             return
 
-        self.set_status(f"AUTO-EVALUATING {len(candidates)} SERVERS...", "orange")
-        self.log(f"[AUTO] Running combined Auto test (ping + sites + speed) for {len(candidates)} servers...")
+        self.set_status(f"AI-EVALUATING {len(candidates)} SERVERS...", "orange")
+        self.log(f"[AI] Testing Gemini, NotebookLM, sites and speed for {len(candidates)} servers...")
 
         avail_results = self._run_availability_test(candidates)
         if not avail_results:
@@ -1389,7 +1380,7 @@ class GibVPNApp(QMainWindow):
             ping_ms = ping_sec * 1000
             score = (sites_count * 100) + (speed_mbps * 50) - (ping_ms * 0.5)
 
-            self.log(f"[AUTO] Server #{idx}: sites={sites_count}, ping={int(ping_ms)}ms, speed={builder.fmt_speed(speed_bps)} -> Score={score:.1f}")
+            self.log(f"[AI] Server #{idx}: sites={sites_count}, ping={int(ping_ms)}ms, speed={builder.fmt_speed(speed_bps)} -> Score={score:.1f}")
             if score > best_score:
                 best_score = score
                 best_idx = idx
@@ -1399,7 +1390,7 @@ class GibVPNApp(QMainWindow):
             best_idx = top_candidates[0][0]
             best_server = servers[best_idx]
 
-        self.log(f"[AUTO] Selected Best Server: #{best_idx} with composite score {best_score:.1f}")
+        self.log(f"[AI] Selected server: #{best_idx} with composite score {best_score:.1f}")
         self._start_best_server(best_server, best_idx, 0)
 
     def ping_test_proxy(self, port, result_list, index):
@@ -1515,16 +1506,6 @@ class GibVPNApp(QMainWindow):
             index = result[0]
             server = servers[index]
             if self._ai_route_works(server):
-                self.log(f"[AI] Google AI-compatible server: #{index}")
-                return result
-            self.log(f"[AI] Server #{index} is reachable, but its WARP exit is unsuitable for Google AI")
-        return None
-
-    def _pick_ai_compatible_ping(self, results, servers):
-        """Return the lowest-latency server with a usable generic WARP path."""
-        for result in sorted(results, key=lambda item: item[1]):
-            index = result[0]
-            if self._ai_route_works(servers[index]):
                 self.log(f"[AI] Google AI-compatible server: #{index}")
                 return result
             self.log(f"[AI] Server #{index} is reachable, but its WARP exit is unsuitable for Google AI")
