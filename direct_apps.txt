@@ -8,3 +8,7 @@ C:\Program Files (x86)\Steam\steam.exe
 C:\Program Files (x86)\Steam\steamapps\common\Battlefield 2042\BF2042.exe
 # Counter-Strike 2
 C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\cs2.exe
+# Legacy Launcher and Minecraft Java
+C:\Users\merka\AppData\Roaming\.tlauncher\legacy\Minecraft\LL.exe
+C:\Users\merka\AppData\Roaming\.tlauncher\legacy\Minecraft\jre\x64\bin\javaw.exe
+C:\Users\merka\servak\TrailerCraft-26.1.2\SERVER-WINDOWS\runtime\current\bin\javaw.exe

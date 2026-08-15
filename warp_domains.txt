@@ -13,6 +13,7 @@ domain:aistudio.google.com
 domain:makersuite.google.com
 domain:ai.google.dev
 domain:deepmind.google
+domain:deepmind.com
 domain:generativelanguage.googleapis.com
 domain:gemini.gstatic.com
 domain:geller-pa.googleapis.com
@@ -20,3 +21,32 @@ domain:alkalimakersuite-pa.clients6.google.com
 domain:webchannel-alkalimakersuite-pa.clients6.google.com
 domain:proactivebackend-pa.googleapis.com
 domain:robinfrontend-pa.googleapis.com
+
+# NotebookLM (веб, источники, загрузка документов)
+domain:notebooklm.google
+domain:notebooklm.google.com
+domain:alkalicontent-pa.clients6.google.com
+domain:content-alkalicontent-pa.googleapis.com
+
+# Google Antigravity & Cloud Code AI
+domain:daily-cloudcode-pa.googleapis.com
+domain:autopush-cloudcode-pa.googleapis.com
+domain:cloudcode-pa.googleapis.com
+domain:daily-autopush-cloudcode-pa.googleapis.com
+domain:antigravity-unleash.goog
+domain:cloudaicompanion.googleapis.com
+domain:aiplatform.googleapis.com
+domain:firebaselogging.googleapis.com
+domain:firebaseinstallations.googleapis.com
+
+# Google Core AI Infrastructure & Auth (единый IP-выход)
+domain:accounts.google.com
+domain:oauth2.googleapis.com
+domain:gstatic.com
+domain:googleusercontent.com
+geosite:google
+domain:google.com
+domain:google
+domain:goog
+domain:googleapis.com
+

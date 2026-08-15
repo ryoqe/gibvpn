@@ -855,6 +855,13 @@ def get_warp_settings(profile_path=None):
 def _resolved_ip(host):
     """Resolve a tunnel endpoint before Windows routes are changed."""
     value = str(host or "").strip().strip("[]")
+    if value == "engage.cloudflareclient.com":
+        try:
+            answers = socket.getaddrinfo(value, None, family=socket.AF_INET, type=socket.SOCK_STREAM)
+            if answers:
+                return answers[0][4][0]
+        except OSError:
+            return "162.159.192.1"
     try:
         ipaddress.ip_address(value)
         return value
@@ -966,8 +973,6 @@ def generate_final_config(
     warp_domains = [
         "geosite:google-gemini",
         "geosite:openai",
-        # Gemini authentication and frontend calls move between shared Google
-        # domains. They must keep one WARP exit IP for the whole session.
         "geosite:google",
         "domain:ai.com",
         "domain:gemini.com",
@@ -977,22 +982,38 @@ def generate_final_config(
         "domain:makersuite.google.com",
         "domain:ai.google.dev",
         "domain:deepmind.google",
+        "domain:deepmind.com",
         "domain:generativelanguage.googleapis.com",
-        # Antigravity 2.0 uses this separate Cloud Code model backend.
+        # Antigravity & Cloud Code backend endpoints
         "domain:daily-cloudcode-pa.googleapis.com",
+        "domain:autopush-cloudcode-pa.googleapis.com",
+        "domain:cloudcode-pa.googleapis.com",
+        "domain:daily-autopush-cloudcode-pa.googleapis.com",
+        "domain:antigravity-unleash.goog",
+        "domain:cloudaicompanion.googleapis.com",
+        "domain:aiplatform.googleapis.com",
+        "domain:firebaselogging.googleapis.com",
+        "domain:firebaseinstallations.googleapis.com",
+        # NotebookLM endpoints
+        "domain:notebooklm.google",
+        "domain:notebooklm.google.com",
+        "domain:alkalicontent-pa.clients6.google.com",
+        "domain:content-alkalicontent-pa.googleapis.com",
+        # Gemini / Google AI internal services & Auth
         "domain:gemini.gstatic.com",
         "domain:geller-pa.googleapis.com",
         "domain:alkalimakersuite-pa.clients6.google.com",
         "domain:webchannel-alkalimakersuite-pa.clients6.google.com",
         "domain:proactivebackend-pa.googleapis.com",
         "domain:robinfrontend-pa.googleapis.com",
+        "domain:accounts.google.com",
+        "domain:oauth2.googleapis.com",
+        "domain:gstatic.com",
+        "domain:googleusercontent.com",
         "domain:kimi.com",
         "domain:goog",
-        "domain:antigravity-unleash.goog",
         "domain:googleapis.com",
         "domain:google.com",
-        # NotebookLM and newer Google AI services use the .google top-level
-        # domain (for example notebooklm.google), not .google.com.
         "domain:google",
         *GPT_DOMAINS,
     ]
@@ -1010,7 +1031,7 @@ def generate_final_config(
     )
     best_server["tag"] = "best-proxy"
     warp_settings = get_warp_settings()
-    if warp_settings and resolve_endpoints:
+    if warp_settings:
         warp_settings = _pin_wireguard_endpoint(warp_settings)
 
     outbounds = [
@@ -1252,19 +1273,23 @@ def generate_tun_config(route_exclude_addresses=None):
                 },
                 {
                     # Model backends add and rotate hosts, so domain lists are
-                    # not enough.  The desktop app starts helper/node
-                    # processes with changing names, therefore matching only
-                    # the launcher names leaks part of its traffic to the
-                    # ordinary tunnel.  Match the installed app directory as
-                    # well: every Antigravity child keeps the same WARP exit.
+                    # not enough. The desktop app starts helper/node
+                    # processes with changing names. Match processes and directories:
                     "process_name": [
                         "Antigravity.exe",
                         "language_server.exe",
                         "agy.exe",
                         "agy-node.exe",
+                        "node.exe",
+                        "code.exe",
                     ],
+                    "action": "route",
+                    "outbound": "xray-warp-out",
+                },
+                {
                     "process_path_regex": [
                         r"(?i).*\\antigravity\\.*",
+                        r"(?i).*\.gemini\\antigravity\\.*",
                     ],
                     "action": "route",
                     "outbound": "xray-warp-out",

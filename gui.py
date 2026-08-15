@@ -1333,8 +1333,8 @@ class GibVPNApp(QMainWindow):
             self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
             return
 
-        self.set_status(f"AI-EVALUATING {len(candidates)} SERVERS...", "orange")
-        self.log(f"[AI] Testing Gemini, NotebookLM, sites and speed for {len(candidates)} servers...")
+        self.set_status(f"AUTO-EVALUATING {len(candidates)} SERVERS...", "orange")
+        self.log(f"[AUTO] Running combined Auto test (ping + sites + speed) for {len(candidates)} servers...")
 
         avail_results = self._run_availability_test(candidates)
         if not avail_results:
@@ -1343,21 +1343,8 @@ class GibVPNApp(QMainWindow):
             self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
             return
 
-        # Keep the same generic chain for every finalist.  Availability ranks
-        # candidates first; this filter prevents the Auto mode from later
-        # replacing the confirmed WARP route with a Google-blocked one.
-        top_candidates = []
-        for result in sorted(avail_results, key=lambda x: (-x[1], x[2])):
-            if self._ai_route_works(servers[result[0]]):
-                top_candidates.append(result)
-                if len(top_candidates) == 3:
-                    break
-        if not top_candidates:
-            self.set_status("NO AI-COMPATIBLE SERVERS", "red")
-            self.log("[AI] No candidate passed the normal server -> WARP Google AI check.")
-            self.is_running = False
-            self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
-            return
+        avail_results.sort(key=lambda x: (-x[1], x[2]))
+        top_candidates = avail_results[:3]
 
         best_idx = None
         best_server = None
@@ -1931,9 +1918,9 @@ class GibVPNApp(QMainWindow):
                 res = s.get(
                     "https://cp.cloudflare.com/generate_204",
                     proxies=self.proxy_dict,
-                    timeout=(2.0, 4.0)
+                    timeout=(3.0, 7.0)
                 )
-                if res.status_code == 204:
+                if res.status_code in (200, 204):
                     failed_attempts = 0
                     self.log("[CORE] Health check: OK")
                 else:
@@ -1943,7 +1930,7 @@ class GibVPNApp(QMainWindow):
                 failed_attempts += 1
                 self.log(f"[CORE] Health check error: {type(e).__name__}")
 
-            if failed_attempts >= 2:
+            if failed_attempts >= 3:
                 if not self.is_running:
                     break
                 self.log("[CORE] Connection dropped! Auto-reconnecting...")
@@ -2473,9 +2460,16 @@ class GibVPNApp(QMainWindow):
                 self.ping_timeout = data.get("ping_timeout", 5.0)
                 self.ping_attempts = data.get("ping_attempts", 3)
 
-                color_rgba = data.get("overlay_color")
-                if color_rgba and isinstance(color_rgba, list) and len(color_rgba) == 4:
-                    self.overlay_color = QColor(*color_rgba)
+                color_val = data.get("overlay_color")
+                if color_val:
+                    if isinstance(color_val, list) and len(color_val) == 4:
+                        self.overlay_color = QColor(*color_val)
+                    elif isinstance(color_val, str) and color_val.startswith("#"):
+                        c = QColor(color_val)
+                        alpha = data.get("overlay_alpha", 120)
+                        if isinstance(alpha, int):
+                            c.setAlpha(alpha)
+                        self.overlay_color = c
 
                 self.bottom_image_path = data.get("bottom_image_path")
                 self.top_image_path = data.get("top_image_path")

@@ -18,7 +18,8 @@ from PyQt6.QtWidgets import (
     QLabel, QPlainTextEdit, QFrame, QFileDialog, QColorDialog,
     QMessageBox, QDialog, QSpinBox, QGroupBox, QFormLayout,
     QSlider, QLineEdit, QCheckBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QScrollArea, QComboBox, QDoubleSpinBox, QInputDialog
+    QHeaderView, QScrollArea, QComboBox, QDoubleSpinBox, QInputDialog,
+    QMenu
 )
 from PyQt6.QtGui import QColor, QPixmap, QBrush
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer
@@ -1001,6 +1002,8 @@ class SubscriptionManagerDialog(QDialog):
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.doubleClicked.connect(self.edit_selected)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
         layout.addWidget(self.table)
 
         btn_layout = QHBoxLayout()
@@ -1181,6 +1184,32 @@ class SubscriptionManagerDialog(QDialog):
             return
         self._start_update(sub)
 
+    def _show_context_menu(self, pos):
+        row = self.table.rowAt(pos.y())
+        if row >= 0:
+            self.table.selectRow(row)
+        idx = self._selected_index()
+        if idx is None:
+            return
+        menu = QMenu(self)
+        act_active = menu.addAction("● Сделать активной")
+        act_update = menu.addAction("Обновить")
+        act_edit = menu.addAction("Редактировать...")
+        act_remove = menu.addAction("Удалить")
+        menu.addSeparator()
+        act_update_all = menu.addAction("Обновить все")
+        act = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if act is act_active:
+            self.set_active_selected()
+        elif act is act_update:
+            self.update_selected()
+        elif act is act_edit:
+            self.edit_selected()
+        elif act is act_remove:
+            self.remove_selected()
+        elif act is act_update_all:
+            self.update_all()
+
     def update_all(self):
         if self._busy:
             return
@@ -1198,7 +1227,10 @@ class SubscriptionManagerDialog(QDialog):
                 except Exception as e:
                     ok, details = False, str(e)
                 results.append((sub.get("name", "Без имени"), ok, details))
-            self.update_all_done.emit(results)
+            try:
+                self.update_all_done.emit(results)
+            except RuntimeError:
+                pass
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1219,7 +1251,10 @@ class SubscriptionManagerDialog(QDialog):
                 ok, details = self.app.update_subscription(sub["url"], sub)
             except Exception as e:
                 ok, details = False, str(e)
-            self.update_done.emit(ok, details, sub)
+            try:
+                self.update_done.emit(ok, details, sub)
+            except RuntimeError:
+                pass
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1695,6 +1730,11 @@ class ServerListDialog(QDialog):
         self._fill_table()
 
     def _show_context_menu(self, pos):
+        row = self.table.rowAt(pos.y())
+        if row >= 0:
+            selected_rows = [idx.row() for idx in self.table.selectionModel().selectedRows()]
+            if row not in selected_rows:
+                self.table.selectRow(row)
         if not self._selected_indices():
             return
         menu = QMenu(self)
@@ -1742,7 +1782,10 @@ class ServerListDialog(QDialog):
                 host = builder.server_address(srv)
                 port = builder.server_port(srv)
                 if not host or not port:
-                    self.ping_update.emit(idx, "—")
+                    try:
+                        self.ping_update.emit(idx, "—")
+                    except RuntimeError:
+                        pass
                     continue
 
                 start = time.time()
@@ -1760,9 +1803,15 @@ class ServerListDialog(QDialog):
                     if sub:
                         sub.setdefault("pings", {})[key] = ms
 
-                self.ping_update.emit(idx, text)
+                try:
+                    self.ping_update.emit(idx, text)
+                except RuntimeError:
+                    pass
 
-            self.ping_finished.emit()
+            try:
+                self.ping_finished.emit()
+            except RuntimeError:
+                pass
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1782,21 +1831,33 @@ class ServerListDialog(QDialog):
             for idx in indices:
                 srv = self.servers[idx]
                 key = builder.server_key(srv)
+                proc = None
                 try:
                     builder.generate_final_config(srv, use_zapret=False, block_quic=True)
                     proc = appcore.start_xray_process(WORK_DIR)
                     time.sleep(0.3)
                     speed_bps, sp_str = builder.measure_server_speed(builder.SOCKS_PORT)
-                    appcore.stop_xray_process(proc)
                     if sub:
                         sub.setdefault("speeds", {})[key] = speed_bps
-                    self.speed_update.emit(idx, speed_bps, sp_str)
+                    try:
+                        self.speed_update.emit(idx, speed_bps, sp_str)
+                    except RuntimeError:
+                        pass
                 except Exception:
                     if sub:
                         sub.setdefault("speeds", {})[key] = 0.0
-                    self.speed_update.emit(idx, 0.0, "FAIL")
+                    try:
+                        self.speed_update.emit(idx, 0.0, "FAIL")
+                    except RuntimeError:
+                        pass
+                finally:
+                    if proc:
+                        appcore.stop_xray_process(proc)
 
-            self.speed_finished.emit()
+            try:
+                self.speed_finished.emit()
+            except RuntimeError:
+                pass
 
         threading.Thread(target=worker, daemon=True).start()
 

@@ -7,5 +7,12 @@
 domain:vk.com
 domain:yandex.ru
 domain:ru
+
+# Legacy Launcher, Ely.by and official Minecraft files
+domain:llaun.ch
+domain:legacylauncher.ru
+domain:mojang.com
+domain:minecraft.net
+domain:ely.by
 domain:рф
 domain:xn--p1ai

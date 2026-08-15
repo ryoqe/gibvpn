@@ -776,6 +776,33 @@ def terminate_process(proc, timeout=1):
             pass
 
 
+def start_xray_process(work_dir=None, config_path=None, port_to_wait=None):
+    """Start an Xray process in background, attached to Job Object."""
+    import subprocess
+    work_dir = work_dir or WORK_DIR
+    xray_exe = os.path.join(work_dir, "xray.exe")
+    if not os.path.exists(xray_exe):
+        xray_exe = "xray.exe"
+    config_path = config_path or os.path.join(work_dir, "config.json")
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    proc = subprocess.Popen(
+        [xray_exe, "run", "-c", config_path],
+        cwd=work_dir,
+        startupinfo=startupinfo
+    )
+    attach_process_to_app_job(proc)
+    if port_to_wait:
+        wait_for_local_port(port_to_wait)
+    return proc
+
+
+def stop_xray_process(proc, timeout=1):
+    """Stop an Xray process."""
+    terminate_process(proc, timeout=timeout)
+
+
+
 desktop_dir = os.path.join(os.path.expanduser("~"), "Desktop")
 DEFAULT_ZAPRET_PATH = os.path.join(desktop_dir, "zapret-discord-youtube-1.9.9c", "zapret-discord-youtube-1.9.9c")
 
@@ -1233,7 +1260,7 @@ def emergency_fix_internet():
     return True, log_lines
 
 
-CURRENT_APP_VERSION = "3.0.33"
+CURRENT_APP_VERSION = "3.0.34"
 
 
 def is_newer_version(candidate, current):
