@@ -114,9 +114,17 @@ def build_exe():
         try:
             os.remove(DIST_EXE)
         except OSError:
-            print("Could not remove old exe, trying to kill process again...")
-            kill_running_exe()
-            os.remove(DIST_EXE)
+            try:
+                temp_old = DIST_EXE + ".old"
+                if os.path.exists(temp_old):
+                    try:
+                        os.remove(temp_old)
+                    except OSError:
+                        pass
+                os.replace(DIST_EXE, temp_old)
+                print(f"Renamed locked {DIST_EXE} to {temp_old}")
+            except OSError:
+                kill_running_exe()
 
     result = run(
         [sys.executable, "-m", "PyInstaller", "GibVPN_Smart_v3.spec", "--noconfirm", "--clean"],

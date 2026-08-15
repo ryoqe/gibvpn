@@ -1664,6 +1664,13 @@ class GibVPNApp(QMainWindow):
                 )
                 return
         use_zap = getattr(self, "use_zapret", False)
+        self.local_port_base = appcore.find_free_local_port_block()
+        builder.configure_local_ports(self.local_port_base)
+        appcore.configure_local_proxy_ports(self.local_port_base)
+        self.proxy_dict = {
+            "http": appcore.LOCAL_HTTP_PROXY_URL,
+            "https": appcore.LOCAL_HTTP_PROXY_URL,
+        }
         tun_server_address = (
             builder.resolved_server_address(best_server)
             if self.connection_mode == "tun" else ""

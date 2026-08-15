@@ -612,11 +612,12 @@ def save_decoded_subscription(url, output_file="decoded_sub.txt"):
 
 
 def read_text_file(filepath):
+    resolved = _find_file_path(filepath) if filepath else filepath
     try:
-        with open(filepath, 'r', encoding='utf-8') as f:
+        with open(resolved, 'r', encoding='utf-8') as f:
             return f.readlines()
     except UnicodeDecodeError:
-        with open(filepath, 'r', encoding='utf-16') as f:
+        with open(resolved, 'r', encoding='utf-16') as f:
             return f.readlines()
     except Exception:
         return []
@@ -691,14 +692,17 @@ def generate_test_config(parsed_servers, base_port=11000, config_path=None):
     return True
 
 
-def get_warp_reserved():
+def get_warp_reserved(account_path=None):
     """Parse `reserved` from wgcf-account.toml.
 
     Handles both TOML list form (`reserved = [1, 2, 3]`) and plain
     comma-separated form (`reserved = '1,2,3'`). Falls back to [0, 0, 0].
     """
+    path = account_path or _find_file_path('wgcf-account.toml')
+    if not os.path.exists(path):
+        return [0, 0, 0]
     try:
-        for line in read_text_file('wgcf-account.toml'):
+        for line in read_text_file(path):
             line = line.strip()
             if not line.startswith('reserved'):
                 continue
@@ -712,12 +716,23 @@ def get_warp_reserved():
 
 
 def _find_file_path(filename):
-    if os.path.exists(filename):
+    if not filename:
         return filename
-    work_path = os.path.join(WORK_DIR, filename)
-    if os.path.exists(work_path):
-        return work_path
-    return filename
+    if os.path.isabs(filename) and os.path.exists(filename):
+        return filename
+    if os.path.exists(filename):
+        return os.path.abspath(filename)
+    import appcore
+    for folder in (WORK_DIR, getattr(appcore, "APP_DIR", None)):
+        if folder:
+            candidate = os.path.join(folder, filename)
+            if os.path.exists(candidate):
+                return candidate
+    appdata_dir = os.path.join(os.environ.get("APPDATA", WORK_DIR), "GibVPN")
+    appdata_path = os.path.join(appdata_dir, filename)
+    if os.path.exists(appdata_path):
+        return appdata_path
+    return os.path.join(WORK_DIR, filename)
 
 
 def read_process_route_matchers(filename):
