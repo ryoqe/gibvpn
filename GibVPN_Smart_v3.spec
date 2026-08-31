@@ -48,7 +48,7 @@ a = Analysis(
     ],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[os.path.join(work_dir, 'pyinstaller_qt_runtime_hook.py')],
     excludes=[],
     noarchive=False,
     optimize=0,
