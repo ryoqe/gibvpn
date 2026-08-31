@@ -1209,7 +1209,7 @@ def generate_final_config(
     return True
 
 
-def generate_tun_config(route_exclude_addresses=None):
+def generate_tun_config(route_exclude_addresses=None, interface_name=None):
     """Generate a full-device TUN config that forwards every packet to Xray.
 
     Xray still owns server selection and transport.  sing-box only creates the
@@ -1244,7 +1244,11 @@ def generate_tun_config(route_exclude_addresses=None):
         "inbounds": [{
             "type": "tun",
             "tag": "tun-in",
-            "interface_name": "gibvpn-tun",
+            # Windows can retain a Wintun adapter for a short time after an
+            # interrupted run.  The caller supplies a per-run name so that a
+            # stale adapter never prevents the next VPN connection from
+            # starting with ERROR_ALREADY_EXISTS.
+            "interface_name": interface_name or "gibvpn-tun",
             # Windows may deny per-interface IPv6 DNS configuration even to an
             # elevated process. IPv4 TUN is sufficient for desktop apps and
             # avoids aborting the entire VPN on those systems.

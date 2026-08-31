@@ -7,6 +7,7 @@ import time
 import json
 import shutil
 import winreg
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import builder
@@ -957,7 +958,14 @@ class GibVPNApp(QMainWindow):
         singbox_exe = appcore.find_singbox_exe()
         if not singbox_exe:
             raise RuntimeError("sing-box.exe не найден в папке программы")
-        config_path = builder.generate_tun_config(route_exclude_addresses)
+        # Do not reuse a fixed Wintun interface name. Windows may keep the
+        # adapter from a crashed/forced-stopped sing-box process, in which case
+        # the next start fails before any server or mode is involved.
+        interface_name = f"gibvpn-{uuid.uuid4().hex[:8]}"
+        config_path = builder.generate_tun_config(
+            route_exclude_addresses, interface_name=interface_name
+        )
+        self.log(f"[TUN] Starting interface {interface_name}")
         proc = subprocess.Popen(
             [singbox_exe, "run", "-c", config_path],
             cwd=os.path.dirname(singbox_exe),
