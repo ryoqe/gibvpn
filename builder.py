@@ -1280,6 +1280,16 @@ def generate_tun_config(route_exclude_addresses=None, interface_name=None):
             "auto_detect_interface": True,
             "rules": [
                 {
+                    # Chromium prefers QUIC for YouTube and Google. Dropping
+                    # UDP/443 in Xray makes it wait before HTTPS fallback;
+                    # reject it in the TUN layer so fallback is immediate.
+                    "network": "udp",
+                    "port": 443,
+                    "action": "reject",
+                    "method": "default",
+                    "no_drop": True,
+                },
+                {
                     # Without this rule Xray's connection to the remote VPN
                     # server is captured by the TUN and sent back to Xray,
                     # creating a loop that cuts off all Internet access.
