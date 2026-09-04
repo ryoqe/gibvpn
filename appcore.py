@@ -18,6 +18,94 @@ if sys.stderr is None:
     sys.stderr = open(os.devnull, 'w')
 
 
+def get_device_hwid(app_dir=None):
+    """Return a persistent hardware/device identifier for subscription requests."""
+    try:
+        import winreg
+        key_path = r"SOFTWARE\Microsoft\Cryptography"
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+            val, _ = winreg.QueryValueEx(key, "MachineGuid")
+            if val:
+                return hashlib.sha256(val.strip().encode("utf-8")).hexdigest()[:16]
+    except Exception:
+        pass
+    folder = app_dir or os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'GibVPN')
+    hwid_file = os.path.join(folder, "device_hwid.txt")
+    if os.path.exists(hwid_file):
+        try:
+            with open(hwid_file, "r", encoding="utf-8") as f:
+                val = f.read().strip()
+                if val:
+                    return val
+        except Exception:
+            pass
+    import uuid
+    new_hwid = uuid.uuid4().hex[:16]
+    try:
+        os.makedirs(folder, exist_ok=True)
+        with open(hwid_file, "w", encoding="utf-8") as f:
+            f.write(new_hwid)
+    except Exception:
+        pass
+    return new_hwid
+
+
+def sync_warp_domains(app_data_dir):
+    """Ensure essential Google AI/Antigravity and auth domains exist in user's warp_domains.txt."""
+    warp_path = os.path.join(app_data_dir, "warp_domains.txt")
+    if not os.path.exists(warp_path):
+        return
+    essential_domains = [
+        "geosite:google-gemini",
+        "domain:gemini.com",
+        "domain:gemini.google.com",
+        "domain:bard.google.com",
+        "domain:aistudio.google.com",
+        "domain:makersuite.google.com",
+        "domain:ai.google.dev",
+        "domain:deepmind.google",
+        "domain:deepmind.com",
+        "domain:generativelanguage.googleapis.com",
+        "domain:gemini.gstatic.com",
+        "domain:geller-pa.googleapis.com",
+        "domain:alkalimakersuite-pa.clients6.google.com",
+        "domain:webchannel-alkalimakersuite-pa.clients6.google.com",
+        "domain:proactivebackend-pa.googleapis.com",
+        "domain:robinfrontend-pa.googleapis.com",
+        "domain:notebooklm.google",
+        "domain:notebooklm.google.com",
+        "domain:alkalicontent-pa.clients6.google.com",
+        "domain:content-alkalicontent-pa.googleapis.com",
+        "domain:daily-cloudcode-pa.googleapis.com",
+        "domain:autopush-cloudcode-pa.googleapis.com",
+        "domain:cloudcode-pa.googleapis.com",
+        "domain:daily-autopush-cloudcode-pa.googleapis.com",
+        "domain:antigravity-unleash.goog",
+        "domain:cloudaicompanion.googleapis.com",
+        "domain:aiplatform.googleapis.com",
+        "domain:firebaselogging.googleapis.com",
+        "domain:firebaseinstallations.googleapis.com",
+        "domain:accounts.google.com",
+        "domain:oauth2.googleapis.com",
+        "domain:gstatic.com",
+        "domain:googleusercontent.com",
+        "domain:lh3.googleusercontent.com",
+        "domain:storage.googleapis.com",
+    ]
+    try:
+        with open(warp_path, "r", encoding="utf-8", errors="ignore") as f:
+            existing_lines = [line.strip() for line in f if line.strip()]
+        existing_set = {line.lower() for line in existing_lines if not line.startswith("#")}
+        missing = [d for d in essential_domains if d.lower() not in existing_set]
+        if missing:
+            with open(warp_path, "a", encoding="utf-8") as f:
+                f.write("\n# Essential Google AI, Antigravity & Auth endpoints (auto-synced)\n")
+                for d in missing:
+                    f.write(f"{d}\n")
+    except Exception:
+        pass
+
+
 def get_app_dir():
     """
     Persistent directory for user data: settings, logs, subscriptions (%APPDATA%\\GibVPN).
@@ -46,6 +134,7 @@ def get_app_dir():
                     shutil.copy2(src, dst)
             except Exception:
                 pass
+    sync_warp_domains(app_data_dir)
     return app_data_dir
 
 
@@ -1260,7 +1349,7 @@ def emergency_fix_internet():
     return True, log_lines
 
 
-CURRENT_APP_VERSION = "3.0.38"
+CURRENT_APP_VERSION = "3.0.39"
 
 
 def is_newer_version(candidate, current):

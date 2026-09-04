@@ -7,8 +7,9 @@ import base64
 import copy
 import ipaddress
 import socket
+import uuid
 
-from appcore import WORK_DIR
+from appcore import WORK_DIR, get_device_hwid
 
 # Loopback port of the Xray API inbound (StatsService) in the final config.
 SOCKS_PORT = 10808
@@ -17,7 +18,7 @@ WARP_SOCKS_PORT = 10810
 WARP_HTTP_PORT = 10811
 XRAY_API_PORT = 10085
 SINGBOX_TUN_CONFIG = "singbox_tun.json"
-TUN_MTU = 1500
+TUN_MTU = 1400
 
 
 def configure_local_ports(base_port):
@@ -508,49 +509,271 @@ def server_port(server):
     return 0
 
 
+def _xray_outbound_to_link(ob, default_remark=""):
+    """Convert an Xray/V2Ray outbound dictionary to a standard share URL."""
+    if not isinstance(ob, dict):
+        return None
+    protocol = ob.get("protocol")
+    tag = ob.get("tag", "")
+    if tag in ("direct", "block", "blocked", "api", "dns-out", "BS_LOOPBACK") or "loopback" in tag.lower():
+        return None
+    remark = ob.get("remark") or default_remark or tag
+    settings = ob.get("settings", {})
+    stream = ob.get("streamSettings", {})
+    network = stream.get("network", "tcp")
+    security = stream.get("security", "none")
+
+    if protocol == "vless":
+        vnext = settings.get("vnext", [])
+        if not vnext or not isinstance(vnext[0], dict):
+            return None
+        srv = vnext[0]
+        host = srv.get("address", "")
+        port = srv.get("port", 443)
+        if not host or host in ("0.0.0.0", "127.0.0.1"):
+            return None
+        users = srv.get("users", [])
+        if not users or not isinstance(users[0], dict):
+            return None
+        uid = users[0].get("id", "")
+        flow = users[0].get("flow", "")
+        params = {"type": network, "security": security}
+        if flow:
+            params["flow"] = flow
+        if security == "reality":
+            rs = stream.get("realitySettings", {})
+            if rs.get("serverName"): params["sni"] = rs.get("serverName")
+            if rs.get("fingerprint"): params["fp"] = rs.get("fingerprint")
+            if rs.get("publicKey"): params["pbk"] = rs.get("publicKey")
+            if rs.get("shortId"): params["sid"] = rs.get("shortId")
+            if rs.get("spiderX"): params["spx"] = rs.get("spiderX")
+        elif security == "tls":
+            ts = stream.get("tlsSettings", {})
+            if ts.get("serverName"): params["sni"] = ts.get("serverName")
+            if ts.get("fingerprint"): params["fp"] = ts.get("fingerprint")
+
+        if network == "ws":
+            ws = stream.get("wsSettings", {})
+            if ws.get("path"): params["path"] = ws.get("path")
+            if ws.get("headers", {}).get("Host"): params["host"] = ws["headers"]["Host"]
+        elif network == "grpc":
+            grpc = stream.get("grpcSettings", {})
+            if grpc.get("serviceName"): params["serviceName"] = grpc.get("serviceName")
+        elif network in ("xhttp", "splithttp"):
+            xh = stream.get("xhttpSettings") or stream.get("splithttpSettings", {})
+            if xh.get("path"): params["path"] = xh.get("path")
+            if xh.get("host"): params["host"] = xh.get("host")
+            if xh.get("mode"): params["mode"] = xh.get("mode")
+
+        qs = urllib.parse.urlencode(params)
+        return f"vless://{uid}@{host}:{port}?{qs}#{urllib.parse.quote(str(remark))}"
+
+    elif protocol == "vmess":
+        vnext = settings.get("vnext", [])
+        if not vnext or not isinstance(vnext[0], dict):
+            return None
+        srv = vnext[0]
+        host = srv.get("address", "")
+        port = srv.get("port", 443)
+        if not host or host in ("0.0.0.0", "127.0.0.1"):
+            return None
+        users = srv.get("users", [])
+        uid = users[0].get("id", "") if users else ""
+        vmess_dict = {
+            "v": "2", "ps": str(remark), "add": host, "port": port,
+            "id": uid, "aid": users[0].get("alterId", 0) if users else 0,
+            "scy": users[0].get("security", "auto") if users else "auto",
+            "net": network, "type": "none",
+            "tls": security if security == "tls" else "",
+        }
+        if security == "tls":
+            vmess_dict["sni"] = stream.get("tlsSettings", {}).get("serverName", "")
+        if network == "ws":
+            vmess_dict["path"] = stream.get("wsSettings", {}).get("path", "")
+            vmess_dict["host"] = stream.get("wsSettings", {}).get("headers", {}).get("Host", "")
+        elif network == "grpc":
+            vmess_dict["path"] = stream.get("grpcSettings", {}).get("serviceName", "")
+        b64 = base64.b64encode(json.dumps(vmess_dict).encode("utf-8")).decode("utf-8")
+        return f"vmess://{b64}"
+
+    elif protocol == "trojan":
+        srvs = settings.get("servers", [])
+        if not srvs or not isinstance(srvs[0], dict):
+            return None
+        srv = srvs[0]
+        host = srv.get("address", "")
+        port = srv.get("port", 443)
+        if not host or host in ("0.0.0.0", "127.0.0.1"):
+            return None
+        pwd = srv.get("password", "")
+        params = {"type": network, "security": security}
+        if security == "tls":
+            ts = stream.get("tlsSettings", {})
+            if ts.get("serverName"): params["sni"] = ts.get("serverName")
+        qs = urllib.parse.urlencode(params)
+        return f"trojan://{pwd}@{host}:{port}?{qs}#{urllib.parse.quote(str(remark))}"
+
+    elif protocol == "shadowsocks":
+        srvs = settings.get("servers", [])
+        if not srvs or not isinstance(srvs[0], dict):
+            return None
+        srv = srvs[0]
+        host = srv.get("address", "")
+        port = srv.get("port", 8388)
+        if not host or host in ("0.0.0.0", "127.0.0.1"):
+            return None
+        method = srv.get("method", "")
+        pwd = srv.get("password", "")
+        userinfo = base64.b64encode(f"{method}:{pwd}".encode("utf-8")).decode("utf-8")
+        return f"ss://{userinfo}@{host}:{port}#{urllib.parse.quote(str(remark))}"
+
+    return None
+
+
+def _singbox_outbound_to_link(ob, default_remark=""):
+    """Convert a Sing-box outbound dictionary to a share URL."""
+    if not isinstance(ob, dict):
+        return None
+    ob_type = ob.get("type", "")
+    tag = ob.get("tag") or default_remark
+    server = ob.get("server", "")
+    port = ob.get("server_port", 443)
+    if not server or server in ("0.0.0.0", "127.0.0.1"):
+        return None
+
+    if ob_type == "vless":
+        uuid_str = ob.get("uuid", "")
+        flow = ob.get("flow", "")
+        tls = ob.get("tls", {})
+        transport = ob.get("transport", {})
+        net = transport.get("type", "tcp")
+        sec = "reality" if tls.get("reality", {}).get("enabled") else ("tls" if tls.get("enabled") else "none")
+        params = {"type": net, "security": sec}
+        if flow: params["flow"] = flow
+        if tls.get("server_name"): params["sni"] = tls.get("server_name")
+        if sec == "reality":
+            r = tls.get("reality", {})
+            if r.get("public_key"): params["pbk"] = r.get("public_key")
+            if r.get("short_id"): params["sid"] = r.get("short_id")
+        if net == "ws":
+            if transport.get("path"): params["path"] = transport.get("path")
+            if transport.get("headers", {}).get("Host"): params["host"] = transport["headers"]["Host"]
+        elif net == "grpc":
+            if transport.get("service_name"): params["serviceName"] = transport.get("service_name")
+        qs = urllib.parse.urlencode(params)
+        return f"vless://{uuid_str}@{server}:{port}?{qs}#{urllib.parse.quote(str(tag))}"
+
+    return None
+
+
+def _extract_links_from_json(data):
+    """Extract share links from JSON array or dict structures."""
+    urls = []
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            return urls
+
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, str):
+                if any(item.startswith(p) for p in ("vless://", "vmess://", "trojan://", "ss://")):
+                    urls.append(item)
+            elif isinstance(item, dict):
+                # Xray config dictionary with outbounds and optional remarks
+                remarks = item.get("remarks") or item.get("remark") or ""
+                outbounds = item.get("outbounds", [])
+                if not outbounds and (item.get("protocol") or item.get("type")):
+                    # Single outbound object
+                    outbounds = [item]
+                for ob in outbounds:
+                    link = _xray_outbound_to_link(ob, remarks) or _singbox_outbound_to_link(ob, remarks)
+                    if link:
+                        urls.append(link)
+    elif isinstance(data, dict):
+        # Could have outbounds, proxies, servers, links
+        for key in ("outbounds", "proxies", "servers", "links", "data", "items"):
+            if key in data and isinstance(data[key], list):
+                urls.extend(_extract_links_from_json(data[key]))
+                if urls:
+                    break
+    return urls
+
+
 def save_decoded_subscription(url, output_file="decoded_sub.txt"):
     """Download a subscription URL and save decoded/plain links to output_file.
 
+    Supports base64/plaintext URI lists, JSON arrays of Xray configs (Happ/Marzban),
+    Sing-box JSON, and sends hardware ID (X-HWID) headers for device-managed subscriptions.
     Returns a tuple (success: bool, details: str).
     """
     import requests
     if not url:
         return False, "URL is empty"
 
-    headers = {
-        "User-Agent": "v2rayN/6.23 (Windows; GibVPN)"
-    }
+    hwid = get_device_hwid()
+    # Try with v2rayN first, then fallback to Happ User-Agent if rejected
+    user_agents = [
+        "v2rayN/6.23 (Windows; GibVPN)",
+        "Happ/2.5.0 (Windows NT 10.0; Win64; x64)",
+    ]
 
     # Temporarily remove proxy environment variables so requests does not throw
     # InvalidSchema errors when ALL_PROXY=socks5:// is set in the environment.
     env_proxies = {k: os.environ.pop(k) for k in list(os.environ.keys()) if "proxy" in k.lower()}
+    last_error = None
     r = None
+
     try:
-        try:
-            r = requests.get(url, headers=headers, timeout=20)
-            r.raise_for_status()
-        except Exception as first_err:
-            # If direct fetch failed (e.g. site blocked in RU), try via local Xray HTTP proxy
+        for ua in user_agents:
+            headers = {
+                "User-Agent": ua,
+                "X-HWID": hwid,
+                "x-hwid": hwid,
+                "X-Device-Id": hwid,
+                "Accept": "*/*",
+            }
             try:
-                r = requests.get(
-                    url,
-                    headers=headers,
-                    proxies={"http": f"http://127.0.0.1:{HTTP_PORT}", "https": f"http://127.0.0.1:{HTTP_PORT}"},
-                    timeout=20
-                )
-                r.raise_for_status()
-            except Exception:
-                raise first_err
-    except requests.exceptions.HTTPError as e:
-        return False, f"HTTP error: {e.response.status_code} {e.response.reason}"
-    except requests.exceptions.ConnectionError:
-        return False, "Connection error: check internet / URL / firewall"
-    except requests.exceptions.Timeout:
-        return False, "Timeout: server did not respond in 20 seconds"
-    except Exception as e:
-        return False, f"Download failed: {type(e).__name__}: {e}"
+                try:
+                    r = requests.get(url, headers=headers, timeout=20)
+                    r.raise_for_status()
+                except Exception as first_err:
+                    # If direct fetch failed (e.g. site blocked in RU), try via local Xray HTTP proxy
+                    try:
+                        r = requests.get(
+                            url,
+                            headers=headers,
+                            proxies={"http": f"http://127.0.0.1:{HTTP_PORT}", "https": f"http://127.0.0.1:{HTTP_PORT}"},
+                            timeout=20
+                        )
+                        r.raise_for_status()
+                    except Exception:
+                        raise first_err
+            except requests.exceptions.HTTPError as e:
+                last_error = f"HTTP error: {e.response.status_code} {e.response.reason}"
+                continue
+            except requests.exceptions.ConnectionError:
+                last_error = "Connection error: check internet / URL / firewall"
+                continue
+            except requests.exceptions.Timeout:
+                last_error = "Timeout: server did not respond in 20 seconds"
+                continue
+            except Exception as e:
+                last_error = f"Download failed: {type(e).__name__}: {e}"
+                continue
+
+            # If response returned a stub like "App not supported", try next User-Agent
+            if r is not None and b"App not supported" in r.content:
+                continue
+
+            if r is not None:
+                break
     finally:
         os.environ.update(env_proxies)
+
+    if r is None:
+        return False, last_error or "Download failed"
 
     content = _bytes_to_text(r.content).strip()
     if not content:
@@ -563,8 +786,7 @@ def save_decoded_subscription(url, output_file="decoded_sub.txt"):
             for prefix in ("vless://", "vmess://", "trojan://", "ss://")
         )
 
-    # If the raw response already contains links, use it as-is (handles comments/headers).
-    # Otherwise try base64 decode; only accept the decoded result if it actually contains links.
+    # 1. Check if raw response has links or is base64 containing links
     decoded = content
     if not _has_links(content):
         b64_decoded = _decode_base64(content)
@@ -572,33 +794,38 @@ def save_decoded_subscription(url, output_file="decoded_sub.txt"):
             decoded = b64_decoded
 
     urls = []
-    # Plain text / base64: one link per line.
+    # Plain text / base64: one link per line
     for line in decoded.splitlines():
         line = line.strip().strip("\ufeff\x00").strip()
         if line and any(line.startswith(prefix) for prefix in ("vless://", "vmess://", "trojan://", "ss://")):
+            # Ignore dummy / unsupported stubs
+            if "@0.0.0.0" in line or "@127.0.0.1" in line or "not supported" in line.lower():
+                continue
             urls.append(line)
 
-    # Some providers return JSON (object or array) containing links.
+    # 2. Check if response is JSON (array of configs or dict)
     if not urls:
         try:
-            data = json.loads(decoded)
-            candidates = []
-            if isinstance(data, list):
-                candidates = data
-            elif isinstance(data, dict):
-                # Common keys used by subscription formats.
-                for key in ("servers", "links", "data", "items"):
-                    if key in data and isinstance(data[key], list):
-                        candidates = data[key]
-                        break
-            for item in candidates:
-                if isinstance(item, str) and any(item.startswith(prefix) for prefix in ("vless://", "vmess://", "trojan://", "ss://")):
-                    urls.append(item)
+            data = json.loads(content)
+            urls = _extract_links_from_json(data)
+        except Exception:
+            pass
+
+    # 3. If still no links, try decoding base64 as JSON
+    if not urls:
+        try:
+            b64_text = _decode_base64(content)
+            if b64_text:
+                data = json.loads(b64_text)
+                urls = _extract_links_from_json(data)
         except Exception:
             pass
 
     if not urls:
         return False, f"No supported links found (first 120 chars: {content[:120]!r})"
+
+    # Deduplicate while preserving order
+    urls = list(dict.fromkeys(urls))
 
     output_text = "\n".join(urls) + "\n"
     try:
@@ -988,7 +1215,6 @@ def generate_final_config(
     warp_domains = [
         "geosite:google-gemini",
         "geosite:openai",
-        "geosite:google",
         "domain:ai.com",
         "domain:gemini.com",
         "domain:gemini.google.com",
@@ -1014,7 +1240,7 @@ def generate_final_config(
         "domain:notebooklm.google.com",
         "domain:alkalicontent-pa.clients6.google.com",
         "domain:content-alkalicontent-pa.googleapis.com",
-        # Gemini / Google AI internal services & Auth
+        # Gemini / Google AI internal services & Auth & Uploads
         "domain:gemini.gstatic.com",
         "domain:geller-pa.googleapis.com",
         "domain:alkalimakersuite-pa.clients6.google.com",
@@ -1025,11 +1251,9 @@ def generate_final_config(
         "domain:oauth2.googleapis.com",
         "domain:gstatic.com",
         "domain:googleusercontent.com",
+        "domain:lh3.googleusercontent.com",
+        "domain:storage.googleapis.com",
         "domain:kimi.com",
-        "domain:goog",
-        "domain:googleapis.com",
-        "domain:google.com",
-        "domain:google",
         *GPT_DOMAINS,
     ]
     wd_file = _find_file_path('warp_domains.txt')
@@ -1074,10 +1298,15 @@ def generate_final_config(
         },
     ]
 
-    # Put protected AI destinations
-    # before user "direct" exceptions: a broad exception such as
-    # ``domain:google`` must not silently bypass WARP for Gemini, NotebookLM
-    # or Antigravity.
+    # Direct domains (RuNet, Zapret YouTube, exceptions) must be evaluated
+    # BEFORE warp_domains so YouTube is never captured by WARP.
+    rules.append({
+        "type": "field",
+        "inboundTag": ["socks-in", "http-in"],
+        "outboundTag": "direct",
+        "domain": direct_domains
+    })
+
     if warp_settings:
         rules.append({
             "type": "field",
@@ -1085,13 +1314,6 @@ def generate_final_config(
             "outboundTag": "warp-proxy",
             "domain": warp_domains
         })
-
-    rules.append({
-        "type": "field",
-        "inboundTag": ["socks-in", "http-in"],
-        "outboundTag": "direct",
-        "domain": direct_domains
-    })
 
     rules.append({
         "type": "field",
@@ -1248,21 +1470,20 @@ def generate_tun_config(route_exclude_addresses=None, interface_name=None):
             # interrupted run.  The caller supplies a per-run name so that a
             # stale adapter never prevents the next VPN connection from
             # starting with ERROR_ALREADY_EXISTS.
-            "interface_name": interface_name or "gibvpn-tun",
+            "interface_name": interface_name or f"gibvpn-{uuid.uuid4().hex[:8]}",
             # Windows may deny per-interface IPv6 DNS configuration even to an
             # elevated process. IPv4 TUN is sufficient for desktop apps and
             # avoids aborting the entire VPN on those systems.
             "address": ["172.19.0.1/30"],
-            # Keep the virtual adapter at the normal Ethernet MTU.  9000 is
-            # only fast on a completely jumbo-capable path; through a remote
-            # SOCKS/Xray hop it causes fragmentation and slow ChatGPT/media.
+            # Keep the virtual adapter at safe MTU (1400) to prevent packet
+            # fragmentation and upload freezes during photo/media transfers.
             "mtu": TUN_MTU,
             "auto_route": True,
             # Windows strict_route installs a WFP DNS block on every physical
             # interface.  On some builds it also blocks sing-box's own DNS
             # transport and leaves the machine without name resolution.
             "strict_route": False,
-            "stack": "system",
+            "stack": "mixed",
         }],
         "outbounds": [
             {"type": "socks", "tag": "xray-out", "server": "127.0.0.1", "server_port": SOCKS_PORT},
@@ -1300,6 +1521,8 @@ def generate_tun_config(route_exclude_addresses=None, interface_name=None):
                     "action": "route",
                     "outbound": "direct",
                 },
+                *forced_vpn_rules,
+                *direct_app_rules,
                 {
                     # Model backends add and rotate hosts, so domain lists are
                     # not enough. The desktop app starts helper/node
@@ -1323,8 +1546,6 @@ def generate_tun_config(route_exclude_addresses=None, interface_name=None):
                     "action": "route",
                     "outbound": "xray-warp-out",
                 },
-                *forced_vpn_rules,
-                *direct_app_rules,
                 {
                     # Keep this after application rules: an excluded program
                     # that sends DNS itself must also bypass the VPN.

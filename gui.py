@@ -8,6 +8,8 @@ import json
 import shutil
 import winreg
 import uuid
+import socket
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 import builder
@@ -237,6 +239,13 @@ class GibVPNApp(QMainWindow):
                 background-color: rgba(255, 255, 255, 80);
             }
         """
+
+        self.btn_subs_dlg = QPushButton("📦 Подписки...", self.left_panel)
+        self.btn_subs_dlg.setStyleSheet(left_btn_style)
+        self.btn_subs_dlg.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_subs_dlg.setToolTip("Управление подписками (добавить, обновить, выбрать активную)")
+        self.btn_subs_dlg.clicked.connect(self.open_subscriptions_dialog)
+        self.left_layout.addWidget(self.btn_subs_dlg)
 
         self.btn_servers_dlg = QPushButton("📋 Список серверов...", self.left_panel)
         self.btn_servers_dlg.setStyleSheet(left_btn_style)
@@ -878,6 +887,9 @@ class GibVPNApp(QMainWindow):
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, activated=self.toggle_vpn)
 
     def update_active_subscription_bg(self):
+        if self.active_subscription_index == -1:
+            self.update_all_subscriptions_bg()
+            return
         sub = self._active_subscription()
         if not sub or not sub.get("url"):
             self.log("Нет активной подписки с URL для обновления")
@@ -896,17 +908,55 @@ class GibVPNApp(QMainWindow):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def update_all_subscriptions_bg(self):
+        if self._sub_update_running:
+            self.log("Обновление подписок уже выполняется...")
+            return
+        subs = [s for s in self.subscriptions if s.get("url")]
+        if not subs:
+            self.log("Нет подписок с URL для обновления")
+            return
+        self._sub_update_running = True
+        self.log(f"[SUBS] Фоновое обновление всех подписок ({len(subs)})...")
+
+        def work():
+            try:
+                def upd(sub):
+                    try:
+                        ok, details = self.update_subscription(sub["url"], sub)
+                    except Exception as e:
+                        ok, details = False, str(e)
+                    return (sub.get("name", "Без имени"), ok, details)
+
+                with ThreadPoolExecutor(max_workers=min(5, len(subs))) as pool:
+                    results = list(pool.map(upd, subs))
+                ok_count = sum(1 for _, ok, _ in results if ok)
+                self.log(f"[SUBS] Фоновое обновление завершено: успешно {ok_count}/{len(results)}")
+            finally:
+                self._sub_update_running = False
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _maybe_auto_update_sub(self):
         if not self.sub_auto_update_hours:
             return
-        sub = self._active_subscription()
-        if not sub or not sub.get("url"):
+        # Check all subscriptions for expiration
+        expired_subs = []
+        for s in self.subscriptions:
+            if not s.get("url"):
+                continue
+            last = s.get("updated_at", 0)
+            if time.time() - last >= self.sub_auto_update_hours * 3600:
+                expired_subs.append(s)
+
+        if not expired_subs:
             return
-        last = sub.get("updated_at", 0)
-        if time.time() - last < self.sub_auto_update_hours * 3600:
-            return
-        self.log(f"[AUTO] Подписка устарела (>{self.sub_auto_update_hours}ч), обновляю...")
-        self.update_active_subscription_bg()
+
+        self.log(f"[AUTO] Устарели подписки ({len(expired_subs)} шт. >{self.sub_auto_update_hours}ч), обновляю...")
+        if len(expired_subs) == len(self.subscriptions) or self.active_subscription_index == -1:
+            self.update_all_subscriptions_bg()
+        else:
+            self.update_active_subscription_bg()
 
     def _running_status_text(self):
         name = self._conn_name or "?"
@@ -1394,26 +1444,26 @@ class GibVPNApp(QMainWindow):
             "https": f"socks5h://127.0.0.1:{port}"
         }
         test_urls = [
-            "https://www.google.com/generate_204",
-            "http://www.google.com/generate_204",
             "http://cp.cloudflare.com/generate_204",
+            "https://www.google.com/generate_204",
             "http://connectivitycheck.gstatic.com/generate_204"
         ]
         s = requests.Session()
         s.trust_env = False
+        timeout_val = min(3.0, self.ping_timeout)
         for url in test_urls:
             start = time.time()
             try:
                 res = s.get(
                     url,
                     proxies=proxies,
-                    timeout=(2.0, self.ping_timeout)
+                    timeout=(1.5, timeout_val)
                 )
                 if res.status_code in (200, 204, 301, 302):
                     result_list.append((index, time.time() - start))
                     return
             except requests.exceptions.ConnectionError:
-                time.sleep(0.1)
+                time.sleep(0.05)
             except Exception:
                 continue
 
@@ -1435,22 +1485,12 @@ class GibVPNApp(QMainWindow):
                     pings.append(time.time() - start)
             except Exception:
                 pass
-        # A probe process can open its local SOCKS port even when the remote
-        # server behind that port is dead. Do not report such a server as a
-        # successful result: max-availability used to select a dead Favorite
-        # with ``0/N`` sites and never fall back to working regular servers.
         if reachable:
             avg_ping = sum(pings) / len(pings)
             result_list.append((index, reachable, avg_ping))
 
     def _ai_route_works(self, server):
-        """Check a server's normal ``server -> personal WARP`` AI path.
-
-        A TCP connection or HTTP 200 alone is not enough: Google may return a
-        country stub or its ``/sorry`` anti-bot page with a successful status.
-        This probe never changes Windows proxy/TUN settings and is used only
-        while choosing a server before the final VPN is started.
-        """
+        """Check a server's normal ``server -> personal WARP`` AI path."""
         if not builder.get_warp_settings():
             return True
         proc = None
@@ -1465,9 +1505,6 @@ class GibVPNApp(QMainWindow):
                 "http": f"socks5h://127.0.0.1:{builder.WARP_SOCKS_PORT}",
                 "https": f"socks5h://127.0.0.1:{builder.WARP_SOCKS_PORT}",
             }
-            # Gemini and NotebookLM have different country allow-lists. A
-            # route that opens Gemini but receives NotebookLM's
-            # ``location=unsupported`` page is not a working AI route.
             for service, url in (
                 ("Gemini", "https://gemini.google.com/"),
                 ("NotebookLM", "https://notebooklm.google.com/"),
@@ -1506,9 +1543,49 @@ class GibVPNApp(QMainWindow):
             self.log(f"[AI] Server #{index} is reachable, but its WARP exit is unsuitable for Google AI")
         return None
 
+    def _run_fast_tcp_ping(self, servers_with_index, timeout=1.5):
+        """Fast parallel TCP connect probe to check reachability and raw RTT in <1s."""
+        if not servers_with_index:
+            return []
+        results = []
+
+        def probe(orig_i, srv):
+            host = builder.server_address(srv)
+            port = builder.server_port(srv)
+            if not host or not port:
+                return
+            t0 = time.time()
+            try:
+                s = socket.create_connection((host, int(port)), timeout=timeout)
+                s.close()
+                rtt = time.time() - t0
+                results.append((orig_i, srv, rtt))
+            except Exception:
+                pass
+
+        max_workers = min(50, max(1, len(servers_with_index)))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            list(pool.map(lambda p: probe(p[0], p[1]), servers_with_index))
+
+        results.sort(key=lambda x: x[2])
+        return results
+
     def _run_ping_test(self, servers_with_index, kill_existing=True):
         if not servers_with_index:
             return []
+
+        # If testing more than 6 servers, pre-filter with fast parallel TCP handshake
+        if len(servers_with_index) > 6:
+            self.log(f"[CORE] Быстрый TCP пинг для {len(servers_with_index)} серверов...")
+            tcp_candidates = self._run_fast_tcp_ping(servers_with_index, timeout=1.5)
+            if tcp_candidates:
+                # Pick top candidates for deep Xray HTTP 204 test
+                servers_with_index = [(i, s) for i, s, _ in tcp_candidates[:6]]
+                self.log(f"[CORE] Выбрано {len(servers_with_index)} лучших серверов для полной проверки через Xray")
+            else:
+                self.log("[CORE] TCP handshake не ответил ни на одном сервере, пробуем базовый список...")
+                servers_with_index = servers_with_index[:6]
+
         test_servers = [srv for _, srv in servers_with_index]
         base_port = 11000 + (getattr(self, "_test_port_offset", 0) % 10) * 200
         self._test_port_offset = getattr(self, "_test_port_offset", 0) + 1
@@ -1524,7 +1601,7 @@ class GibVPNApp(QMainWindow):
         test_process = self._spawn_xray(is_test=True, config_path=test_config_path)
         results = []
         try:
-            time.sleep(1.5)
+            time.sleep(0.7)
             max_workers = min(20, max(1, len(servers_with_index)))
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = [
@@ -1533,7 +1610,7 @@ class GibVPNApp(QMainWindow):
                 ]
                 for f in futures:
                     try:
-                        f.result(timeout=self.ping_timeout + 2)
+                        f.result(timeout=self.ping_timeout + 1)
                     except Exception:
                         pass
         finally:
@@ -2108,6 +2185,11 @@ class GibVPNApp(QMainWindow):
 
 
 
+    def open_subscriptions_dialog(self):
+        dlg = SubscriptionManagerDialog(self, self)
+        dlg.exec()
+        self.log(f"[SUBS] Текущая подписка: {self._active_subscription_info()}")
+
     def open_ping_sites_dialog(self):
         dlg = PingSitesDialog(self)
         dlg.exec()
@@ -2349,12 +2431,14 @@ class GibVPNApp(QMainWindow):
             self.log("ERROR: No valid servers parsed!")
             return None, sub
         return servers, sub
-        return servers, sub
 
     def _active_subscription_info(self):
         sub = self._active_subscription()
         if not sub:
             return "Нет активной подписки"
+        if self.active_subscription_index == -1:
+            total_count = sum(len(self._load_servers_for_subscription(s)) for s in self.subscriptions) + len(self._get_custom_servers())
+            return f"★ Все подписки ({total_count} серверов)"
         count = len(self._load_servers_for_subscription(sub))
         return f"{sub.get('name', 'Без имени')} ({count} серверов)"
 
@@ -2566,9 +2650,17 @@ class GibVPNApp(QMainWindow):
             "active_subscription_index": self.active_subscription_index
         }
         try:
-            with open(settings_file, "w", encoding="utf-8") as f:
+            settings_dir = os.path.dirname(os.path.abspath(settings_file))
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=settings_dir, prefix="settings_", suffix=".tmp")
+            with open(tmp_fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(tmp_path, settings_file)
         except Exception as e:
+            if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
             log_exception("save_settings failed")
             self.log(f"Ошибка сохранения настроек: {e}")
 

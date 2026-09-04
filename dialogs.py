@@ -5,6 +5,7 @@ import time
 import shutil
 import urllib.parse
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import builder
 import appcore
@@ -1220,13 +1221,15 @@ class SubscriptionManagerDialog(QDialog):
         self._set_busy(True, f"Обновление всех подписок ({len(subs)})...")
 
         def work():
-            results = []
-            for sub in subs:
+            def upd(sub):
                 try:
                     ok, details = self.app.update_subscription(sub["url"], sub)
                 except Exception as e:
                     ok, details = False, str(e)
-                results.append((sub.get("name", "Без имени"), ok, details))
+                return (sub.get("name", "Без имени"), ok, details)
+
+            with ThreadPoolExecutor(max_workers=min(5, len(subs))) as pool:
+                results = list(pool.map(upd, subs))
             try:
                 self.update_all_done.emit(results)
             except RuntimeError:
@@ -1776,7 +1779,7 @@ class ServerListDialog(QDialog):
         sub = self.parent_app._active_subscription()
 
         def worker():
-            for idx in indices:
+            def ping_one(idx):
                 srv = self.servers[idx]
                 key = builder.server_key(srv)
                 host = builder.server_address(srv)
@@ -1786,12 +1789,12 @@ class ServerListDialog(QDialog):
                         self.ping_update.emit(idx, "—")
                     except RuntimeError:
                         pass
-                    continue
+                    return
 
                 start = time.time()
                 try:
                     import socket
-                    s = socket.create_connection((host, port), timeout=2.5)
+                    s = socket.create_connection((host, port), timeout=1.5)
                     s.close()
                     ms = int((time.time() - start) * 1000)
                     text = f"{ms} ms"
@@ -1807,6 +1810,10 @@ class ServerListDialog(QDialog):
                     self.ping_update.emit(idx, text)
                 except RuntimeError:
                     pass
+
+            max_w = min(30, max(1, len(indices)))
+            with ThreadPoolExecutor(max_workers=max_w) as pool:
+                list(pool.map(ping_one, indices))
 
             try:
                 self.ping_finished.emit()
