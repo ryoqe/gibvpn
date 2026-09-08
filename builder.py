@@ -1449,19 +1449,50 @@ def generate_tun_config(route_exclude_addresses=None, interface_name=None):
                 "action": "route",
                 "outbound": "direct",
             })
+    direct_apps = read_process_route_matchers("direct_apps.txt")
+    dns_rules = []
+    for field in ("domain_suffix", "domain", "domain_regex"):
+        if direct_domain_matchers[field]:
+            dns_rules.append({
+                field: direct_domain_matchers[field],
+                "server": "local-dns",
+            })
+    for field in ("process_name", "process_path"):
+        if direct_apps[field]:
+            dns_rules.append({
+                field: direct_apps[field],
+                "server": "local-dns",
+            })
+
     config = {
         "log": {"level": "warn"},
         "dns": {
-            "servers": [{
-                "tag": "remote-dns",
-                # Plain DNS over TCP inside the encrypted Xray tunnel avoids
-                # the TLS/bootstrap deadlock observed on Windows TUN startup.
-                "type": "tcp",
-                "server": "1.1.1.1",
-                "server_port": 53,
-                "detour": "xray-out",
-            }],
+            "servers": [
+                {
+                    "tag": "remote-dns",
+                    # Plain DNS over TCP inside the encrypted Xray tunnel avoids
+                    # the TLS/bootstrap deadlock observed on Windows TUN startup.
+                    "type": "tcp",
+                    "server": "1.1.1.1",
+                    "server_port": 53,
+                    "detour": "xray-out",
+                },
+                {
+                    "tag": "remote-dns-fallback",
+                    "type": "tcp",
+                    "server": "8.8.8.8",
+                    "server_port": 53,
+                    "detour": "xray-out",
+                },
+                {
+                    "tag": "local-dns",
+                    "type": "local",
+                    "detour": "direct",
+                },
+            ],
+            "rules": dns_rules,
             "final": "remote-dns",
+            "strategy": "prefer_ipv4",
         },
         "inbounds": [{
             "type": "tun",
@@ -1499,6 +1530,7 @@ def generate_tun_config(route_exclude_addresses=None, interface_name=None):
         ],
         "route": {
             "auto_detect_interface": True,
+            "default_domain_resolver": "local-dns",
             "rules": [
                 {
                     # Chromium prefers QUIC for YouTube and Google. Dropping

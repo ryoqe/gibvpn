@@ -2595,6 +2595,18 @@ class GibVPNApp(QMainWindow):
                     self.subscriptions = subs
                     self.active_subscription_index = data.get("active_subscription_index", 0)
 
+                # If autostart is registered in Windows, ensure autostart_enabled reflects it
+                # and points to the running executable.
+                registry_autostart = self.is_autostart_enabled()
+                if registry_autostart:
+                    self.autostart_enabled = True
+                    if getattr(sys, "frozen", False):
+                        self.set_autostart(True)
+                else:
+                    self.autostart_enabled = bool(data.get("autostart_enabled", False))
+                    if self.autostart_enabled and getattr(sys, "frozen", False):
+                        self.set_autostart(True)
+
                 self.log(f"Настройки успешно загружены из {self.settings_file}")
                 if (legacy_conflict or repaired_sites or
                         data.get("connection_mode") != stored_connection_mode):
