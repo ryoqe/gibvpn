@@ -1520,7 +1520,6 @@ def generate_tun_config(route_exclude_addresses=None, interface_name=None):
             "type": "udp",
             "server": gateway_ip,
             "server_port": 53,
-            "detour": "direct",
         })
     dns_servers.append({
         "tag": "local-dns",
