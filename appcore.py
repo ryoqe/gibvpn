@@ -537,13 +537,17 @@ def configure_local_proxy_ports(base_port):
     LOCAL_ANTIGRAVITY_PROXY_URL = f"http://127.0.0.1:{int(base_port) + 3}"
 
 
-def _is_gibvpn_local_proxy(value, offsets=(1, 3)):
+def _is_gibvpn_local_proxy(value, offsets=(0, 1, 2, 3)):
     """Recognize a proxy from any port block used by an earlier run."""
-    text = str(value or "").removeprefix("http://")
+    text = str(value or "").strip()
+    for prefix in ("http://", "https://", "socks5h://", "socks5://", "socks4://", "socks://"):
+        if text.lower().startswith(prefix):
+            text = text[len(prefix):]
     if not text.startswith("127.0.0.1:"):
         return False
     try:
-        port = int(text.rsplit(":", 1)[1])
+        port_part = text.split(":", 1)[1].split("/")[0]
+        port = int(port_part)
     except (ValueError, IndexError):
         return False
     bases = (10808, 11808, 12808, 13808, 20808, 21808, 30808)
@@ -584,27 +588,47 @@ def clear_windows_system_proxy_backup():
         pass
 
 
+def disable_windows_system_proxy_if_ours():
+    """Disable Windows system proxy if it currently points to GibVPN."""
+    if os.name != "nt":
+        return False
+    import winreg
+    try:
+        current = read_windows_system_proxy()
+        is_ours = (
+            current.get("ProxyEnable", {}).get("value") == 1
+            and _is_gibvpn_local_proxy(current.get("ProxyServer", {}).get("value"))
+        )
+        if is_ours:
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+            return True
+        return False
+    except Exception:
+        return False
+
+
 def recover_windows_system_proxy():
-    """Restore only a proxy configuration that still points to GibVPN itself."""
+    """Restore or disable a proxy configuration that still points to GibVPN itself."""
     import json
     if not os.path.exists(SYSTEM_PROXY_BACKUP_PATH):
-        return False
+        return disable_windows_system_proxy_if_ours()
     try:
         with open(SYSTEM_PROXY_BACKUP_PATH, "r", encoding="utf-8") as handle:
             snapshot = json.load(handle)
         current = read_windows_system_proxy()
         is_ours = (
             current.get("ProxyEnable", {}).get("value") == 1
-            and _is_gibvpn_local_proxy(
-                current.get("ProxyServer", {}).get("value"), offsets=(1,)
-            )
+            and _is_gibvpn_local_proxy(current.get("ProxyServer", {}).get("value"))
         )
         if is_ours:
             restore_windows_system_proxy(snapshot)
         clear_windows_system_proxy_backup()
         return is_ours
     except (OSError, ValueError):
-        return False
+        clear_windows_system_proxy_backup()
+        return disable_windows_system_proxy_if_ours()
 
 
 def _broadcast_environment_change():
@@ -708,25 +732,57 @@ def clear_user_environment_proxy_backup():
         pass
 
 
+def disable_user_environment_proxy_if_ours():
+    """Remove user environment proxy variables if they point to GibVPN."""
+    if os.name != "nt":
+        return False
+    import winreg
+    cleaned = False
+    try:
+        current = read_user_environment_proxy()
+        targets_to_clean = []
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+            val = current.get(name, {}).get("value")
+            if val and _is_gibvpn_local_proxy(val):
+                targets_to_clean.append(name)
+        if targets_to_clean:
+            with winreg.CreateKeyEx(
+                winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE
+            ) as key:
+                for name in targets_to_clean:
+                    try:
+                        winreg.DeleteValue(key, name)
+                    except FileNotFoundError:
+                        pass
+                    os.environ.pop(name, None)
+                    cleaned = True
+            if cleaned:
+                _broadcast_environment_change()
+        return cleaned
+    except Exception:
+        return False
+
+
 def recover_user_environment_proxy():
-    """Recover only environment values that still point to GibVPN itself."""
+    """Recover environment values that still point to GibVPN itself."""
     import json
     if not os.path.exists(ENVIRONMENT_PROXY_BACKUP_PATH):
-        return False
+        return disable_user_environment_proxy_if_ours()
     try:
         with open(ENVIRONMENT_PROXY_BACKUP_PATH, "r", encoding="utf-8") as handle:
             snapshot = json.load(handle)
         current = read_user_environment_proxy()
-        is_ours = all(
-            _is_gibvpn_local_proxy(current.get(name, {}).get("value"), offsets=(1,))
-            for name in ("HTTP_PROXY", "HTTPS_PROXY")
+        is_ours = any(
+            _is_gibvpn_local_proxy(current.get(name, {}).get("value"))
+            for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
         )
         if is_ours:
             restore_user_environment_proxy(snapshot)
         clear_user_environment_proxy_backup()
         return is_ours
     except (OSError, ValueError):
-        return False
+        clear_user_environment_proxy_backup()
+        return disable_user_environment_proxy_if_ours()
 
 
 def enable_antigravity_proxy(proxy_url=None):
@@ -776,12 +832,38 @@ def enable_antigravity_proxy(proxy_url=None):
         return False
 
 
+def disable_antigravity_proxy_if_ours():
+    """Remove Antigravity proxy settings if they point to GibVPN."""
+    import json
+    if not os.path.exists(ANTIGRAVITY_SETTINGS_PATH):
+        return False
+    try:
+        with open(ANTIGRAVITY_SETTINGS_PATH, "r", encoding="utf-8-sig") as handle:
+            settings = json.load(handle)
+        if (
+            isinstance(settings, dict)
+            and _is_gibvpn_local_proxy(settings.get("http.proxy"))
+        ):
+            settings.pop("http.proxy", None)
+            if settings.get("http.proxySupport") == "override":
+                settings.pop("http.proxySupport", None)
+            temp_settings = ANTIGRAVITY_SETTINGS_PATH + ".tmp"
+            with open(temp_settings, "w", encoding="utf-8") as handle:
+                json.dump(settings, handle, ensure_ascii=False, indent=4)
+                handle.write("\n")
+            os.replace(temp_settings, ANTIGRAVITY_SETTINGS_PATH)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def recover_antigravity_proxy():
     """Restore Antigravity proxy keys if they are still managed by GibVPN."""
     import json
 
     if not os.path.exists(ANTIGRAVITY_PROXY_BACKUP_PATH):
-        return False
+        return disable_antigravity_proxy_if_ours()
     restored = False
     try:
         with open(ANTIGRAVITY_PROXY_BACKUP_PATH, "r", encoding="utf-8") as handle:
@@ -803,7 +885,7 @@ def recover_antigravity_proxy():
             os.replace(temp_settings, ANTIGRAVITY_SETTINGS_PATH)
             restored = True
     except (OSError, ValueError, TypeError):
-        pass
+        return disable_antigravity_proxy_if_ours()
     finally:
         try:
             os.remove(ANTIGRAVITY_PROXY_BACKUP_PATH)
@@ -1349,7 +1431,7 @@ def emergency_fix_internet():
     return True, log_lines
 
 
-CURRENT_APP_VERSION = "3.0.40"
+CURRENT_APP_VERSION = "3.0.41"
 
 
 def is_newer_version(candidate, current):

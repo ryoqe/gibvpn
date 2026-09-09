@@ -8,6 +8,7 @@ import copy
 import ipaddress
 import socket
 import uuid
+import subprocess
 
 from appcore import WORK_DIR, get_device_hwid
 
@@ -1431,6 +1432,34 @@ def generate_final_config(
     return True
 
 
+def get_physical_default_gateway():
+    """Detect the physical default gateway IP to route direct DNS without deadlocks."""
+    if os.name != "nt":
+        return None
+    try:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        out = subprocess.check_output(
+            "route print 0.0.0.0",
+            shell=True,
+            text=True,
+            errors="ignore",
+            creationflags=creationflags,
+        )
+        for line in out.splitlines():
+            parts = line.strip().split()
+            if len(parts) >= 5 and parts[0] == "0.0.0.0" and parts[1] == "0.0.0.0":
+                gw_str = parts[2]
+                try:
+                    ip = ipaddress.ip_address(gw_str)
+                    if ip.is_private and not gw_str.startswith("172.19."):
+                        return gw_str
+                except ValueError:
+                    continue
+    except Exception:
+        pass
+    return None
+
+
 def generate_tun_config(route_exclude_addresses=None, interface_name=None):
     """Generate a full-device TUN config that forwards every packet to Xray.
 
@@ -1438,6 +1467,9 @@ def generate_tun_config(route_exclude_addresses=None, interface_name=None):
     Windows virtual adapter, hijacks DNS, and transparently sends TCP/UDP to
     the local SOCKS inbound.
     """
+    gateway_ip = get_physical_default_gateway()
+    direct_dns_tag = "direct-dns-gateway" if gateway_ip else "local-dns"
+
     forced_vpn_rules = _process_route_rules("vpn_apps.txt", "xray-out")
     direct_app_rules = _process_route_rules("direct_apps.txt", "direct")
     direct_domain_matchers = read_tun_direct_domain_matchers()
@@ -1455,41 +1487,51 @@ def generate_tun_config(route_exclude_addresses=None, interface_name=None):
         if direct_domain_matchers[field]:
             dns_rules.append({
                 field: direct_domain_matchers[field],
-                "server": "local-dns",
+                "server": direct_dns_tag,
             })
     for field in ("process_name", "process_path"):
         if direct_apps[field]:
             dns_rules.append({
                 field: direct_apps[field],
-                "server": "local-dns",
+                "server": direct_dns_tag,
             })
+
+    dns_servers = [
+        {
+            "tag": "remote-dns",
+            # Plain DNS over TCP inside the encrypted Xray tunnel avoids
+            # the TLS/bootstrap deadlock observed on Windows TUN startup.
+            "type": "tcp",
+            "server": "1.1.1.1",
+            "server_port": 53,
+            "detour": "xray-out",
+        },
+        {
+            "tag": "remote-dns-fallback",
+            "type": "tcp",
+            "server": "8.8.8.8",
+            "server_port": 53,
+            "detour": "xray-out",
+        },
+    ]
+    if gateway_ip:
+        dns_servers.append({
+            "tag": "direct-dns-gateway",
+            "type": "udp",
+            "server": gateway_ip,
+            "server_port": 53,
+            "detour": "direct",
+        })
+    dns_servers.append({
+        "tag": "local-dns",
+        "type": "local",
+        "detour": "direct",
+    })
 
     config = {
         "log": {"level": "warn"},
         "dns": {
-            "servers": [
-                {
-                    "tag": "remote-dns",
-                    # Plain DNS over TCP inside the encrypted Xray tunnel avoids
-                    # the TLS/bootstrap deadlock observed on Windows TUN startup.
-                    "type": "tcp",
-                    "server": "1.1.1.1",
-                    "server_port": 53,
-                    "detour": "xray-out",
-                },
-                {
-                    "tag": "remote-dns-fallback",
-                    "type": "tcp",
-                    "server": "8.8.8.8",
-                    "server_port": 53,
-                    "detour": "xray-out",
-                },
-                {
-                    "tag": "local-dns",
-                    "type": "local",
-                    "detour": "direct",
-                },
-            ],
+            "servers": dns_servers,
             "rules": dns_rules,
             "final": "remote-dns",
             "strategy": "prefer_ipv4",
@@ -1530,7 +1572,7 @@ def generate_tun_config(route_exclude_addresses=None, interface_name=None):
         ],
         "route": {
             "auto_detect_interface": True,
-            "default_domain_resolver": "local-dns",
+            "default_domain_resolver": direct_dns_tag,
             "rules": [
                 {
                     # Chromium prefers QUIC for YouTube and Google. Dropping
@@ -1597,7 +1639,10 @@ def generate_tun_config(route_exclude_addresses=None, interface_name=None):
         },
     }
     exclusions = []
-    for address in route_exclude_addresses or []:
+    all_exclude_addrs = list(route_exclude_addresses or [])
+    if gateway_ip and gateway_ip not in all_exclude_addrs:
+        all_exclude_addrs.append(gateway_ip)
+    for address in all_exclude_addrs:
         try:
             ip = ipaddress.ip_address(str(address).strip())
         except ValueError:

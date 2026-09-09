@@ -165,12 +165,19 @@ class GibVPNApp(QMainWindow):
         self.show_dialog_signal.connect(self._show_dialog_slot)
 
         self.load_settings()
+        self.sync_autostart_path()
         if appcore.recover_windows_system_proxy():
             self.log("[SYSTEM] После прошлого завершения восстановлены настройки прокси Windows")
+        else:
+            appcore.disable_windows_system_proxy_if_ours()
         if appcore.recover_user_environment_proxy():
             self.log("[SYSTEM] После прошлого завершения восстановлен прокси приложений")
+        else:
+            appcore.disable_user_environment_proxy_if_ours()
         if appcore.recover_antigravity_proxy():
             self.log("[SYSTEM] Восстановлены прежние настройки Antigravity")
+        else:
+            appcore.disable_antigravity_proxy_if_ours()
         self._setup_tray()
         self._setup_hotkeys()
 
@@ -830,6 +837,9 @@ class GibVPNApp(QMainWindow):
             return
         self.is_running = False
         self.stop_vpn()
+        appcore.disable_windows_system_proxy_if_ours()
+        appcore.disable_user_environment_proxy_if_ours()
+        appcore.disable_antigravity_proxy_if_ours()
         event.accept()
 
     def _make_tray_icon(self):
@@ -1960,6 +1970,9 @@ class GibVPNApp(QMainWindow):
                 self.log(f"[SYSTEM] Не удалось восстановить прокси Windows: {exc}")
             finally:
                 self._system_proxy_snapshot = None
+        else:
+            if appcore.disable_windows_system_proxy_if_ours():
+                self.log("[SYSTEM] Отключён системный прокси GibVPN")
         if self._environment_proxy_snapshot is not None:
             try:
                 appcore.restore_user_environment_proxy(
@@ -1971,8 +1984,13 @@ class GibVPNApp(QMainWindow):
                 self.log(f"[SYSTEM] Не удалось восстановить прокси приложений: {exc}")
             finally:
                 self._environment_proxy_snapshot = None
+        else:
+            if appcore.disable_user_environment_proxy_if_ours():
+                self.log("[SYSTEM] Убран прокси приложений GibVPN")
         if appcore.recover_antigravity_proxy():
             self.log("[SYSTEM] Восстановлены прежние настройки Antigravity")
+        else:
+            appcore.disable_antigravity_proxy_if_ours()
         if self.zapret_process or self.use_zapret:
             stop_zapret_process(self.zapret_process)
             self.zapret_process = None
@@ -2245,6 +2263,26 @@ class GibVPNApp(QMainWindow):
             return False
         except Exception:
             return False
+
+    def sync_autostart_path(self):
+        """Ensure autostart registry entry points to the currently running executable."""
+        if not getattr(sys, "frozen", False):
+            return
+        cur_exe = os.path.abspath(sys.executable)
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, self._autostart_key(), 0, winreg.KEY_READ
+            ) as key:
+                val, _ = winreg.QueryValueEx(key, "GibVPN")
+            current_target = str(val or "").strip().strip('"')
+            if current_target and os.path.abspath(current_target).lower() != cur_exe.lower():
+                with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER, self._autostart_key(), 0, winreg.KEY_WRITE
+                ) as key:
+                    winreg.SetValueEx(key, "GibVPN", 0, winreg.REG_SZ, f'"{cur_exe}"')
+                self.log(f"[AUTOSTART] Путь автозапуска обновлён на актуальный: {cur_exe}")
+        except Exception:
+            pass
 
     def set_autostart(self, enabled):
         try:
