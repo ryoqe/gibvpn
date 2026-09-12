@@ -655,6 +655,10 @@ class GibVPNApp(QMainWindow):
         self.btn_speed.setStyleSheet(self._round_btn_style(selected=(self.current_mode == "speed")))
         self.btn_auto.setStyleSheet(self._round_btn_style(selected=(self.current_mode == "auto")))
 
+    def _set_mode_buttons_enabled(self, enabled):
+        for button in (self.btn_min, self.btn_max, self.btn_speed, self.btn_auto):
+            button.setEnabled(enabled)
+
     @staticmethod
     def _connection_mode_button_style(selected):
         if selected:
@@ -794,6 +798,10 @@ class GibVPNApp(QMainWindow):
 
     def _run_vpn_worker(self, fn):
         self.set_toggle("СТОП", "#1F4E79", "#2A6299", False)
+        # Do not allow a second selection worker to start while the previous
+        # mode is still probing servers. Otherwise an AI worker can continue
+        # logging/testing after the user has already clicked MIN/MAX/SPEED.
+        self._set_mode_buttons_enabled(False)
         self.btn_proxy_mode.setEnabled(False)
         self.btn_tun_mode.setEnabled(False)
         self._worker = Worker(fn)
@@ -804,6 +812,7 @@ class GibVPNApp(QMainWindow):
             lambda: (
                 self.btn_proxy_mode.setEnabled(True),
                 self.btn_tun_mode.setEnabled(True),
+                self._set_mode_buttons_enabled(True),
             )
         )
         self._worker.start()
@@ -1401,8 +1410,8 @@ class GibVPNApp(QMainWindow):
             self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
             return
 
-        self.set_status(f"AUTO-EVALUATING {len(candidates)} SERVERS...", "orange")
-        self.log(f"[AUTO] Running combined Auto test (ping + sites + speed) for {len(candidates)} servers...")
+        self.set_status(f"AI: TESTING {len(candidates)} SERVERS...", "orange")
+        self.log(f"[AI] Running AI-only test (Gemini + NotebookLM + availability + speed) for {len(candidates)} servers...")
 
         avail_results = self._run_availability_test(candidates)
         if not avail_results:
@@ -1413,6 +1422,18 @@ class GibVPNApp(QMainWindow):
 
         avail_results.sort(key=lambda x: (-x[1], x[2]))
         top_candidates = avail_results[:3]
+
+        # Only the explicit AI mode performs service probes. MIN, MAX and
+        # SPEED never call this path; they retain their own independent
+        # ping/availability/throughput selection logic.
+        self.set_status(f"AI: CHECKING WARP ON {len(top_candidates)} SERVERS...", "orange")
+        top_candidates = self._filter_ai_compatible(top_candidates, servers)
+        if not top_candidates:
+            self.set_status("NO AI-COMPATIBLE WARP EXIT", "red")
+            self.log("[AI] No candidate opened real Gemini and NotebookLM pages through WARP")
+            self.is_running = False
+            self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
+            return
 
         best_idx = None
         best_server = None
@@ -1530,7 +1551,6 @@ class GibVPNApp(QMainWindow):
                     or "location=unsupported" in final_url
                     or "isn't currently supported in your country" in text
                     or "not available in your country" in text
-                    or "location=unsupported" in text
                 )
                 if response.status_code >= 400 or blocked:
                     self.log(f"[AI] {service} rejected the current WARP exit")
@@ -1552,6 +1572,18 @@ class GibVPNApp(QMainWindow):
                 return result
             self.log(f"[AI] Server #{index} is reachable, but its WARP exit is unsuitable for Google AI")
         return None
+
+    def _filter_ai_compatible(self, results, servers):
+        """Keep candidates whose real two-hop WARP path serves Google AI."""
+        compatible = []
+        for result in sorted(results, key=lambda item: (-item[1], item[2])):
+            index = result[0]
+            if self._ai_route_works(servers[index]):
+                self.log(f"[AI] Server #{index}: Gemini/NotebookLM WARP path is usable")
+                compatible.append(result)
+            else:
+                self.log(f"[AI] Server #{index}: WARP path rejected by Google AI")
+        return compatible
 
     def _run_fast_tcp_ping(self, servers_with_index, timeout=1.5):
         """Fast parallel TCP connect probe to check reachability and raw RTT in <1s."""

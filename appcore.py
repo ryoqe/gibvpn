@@ -86,6 +86,8 @@ def sync_warp_domains(app_data_dir):
         "domain:firebaselogging.googleapis.com",
         "domain:firebaseinstallations.googleapis.com",
         "domain:accounts.google.com",
+        "domain:google.com",
+        "domain:googleapis.com",
         "domain:oauth2.googleapis.com",
         "domain:gstatic.com",
         "domain:googleusercontent.com",
@@ -1431,7 +1433,7 @@ def emergency_fix_internet():
     return True, log_lines
 
 
-CURRENT_APP_VERSION = "3.0.42"
+CURRENT_APP_VERSION = "3.0.43"
 
 
 def is_newer_version(candidate, current):

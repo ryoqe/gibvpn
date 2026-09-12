@@ -41,9 +41,10 @@ domain:firebaseinstallations.googleapis.com
 
 # Google Core AI Infrastructure & Auth & Uploads (единый IP-выход)
 domain:accounts.google.com
+domain:google.com
+domain:googleapis.com
 domain:oauth2.googleapis.com
 domain:gstatic.com
 domain:googleusercontent.com
 domain:lh3.googleusercontent.com
 domain:storage.googleapis.com
-

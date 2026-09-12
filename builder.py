@@ -1249,6 +1249,11 @@ def generate_final_config(
         "domain:proactivebackend-pa.googleapis.com",
         "domain:robinfrontend-pa.googleapis.com",
         "domain:accounts.google.com",
+        # Gemini authentication and session bootstrap also use www.google.com
+        # and other rotating google.com hosts. Keep the whole suffix on the
+        # same WARP exit; YouTube uses separate youtube/googlevideo domains.
+        "domain:google.com",
+        "domain:googleapis.com",
         "domain:oauth2.googleapis.com",
         "domain:gstatic.com",
         "domain:googleusercontent.com",
@@ -1299,15 +1304,25 @@ def generate_final_config(
         },
     ]
 
-    # Direct domains (RuNet, Zapret YouTube, exceptions) must be evaluated
-    # BEFORE warp_domains so YouTube is never captured by WARP.
+    # Keep YouTube on one regular route even though its API hostname lives
+    # below googleapis.com. This lets the rest of Google/Gemini APIs use WARP
+    # without splitting YouTube media across two exits.
     rules.append({
         "type": "field",
         "inboundTag": ["socks-in", "http-in"],
-        "outboundTag": "direct",
-        "domain": direct_domains
+        "outboundTag": "direct" if use_zapret else "best-proxy",
+        "domain": [
+            "geosite:youtube",
+            "domain:youtube.com",
+            "domain:youtu.be",
+            "domain:googlevideo.com",
+            "domain:ytimg.com",
+            "domain:youtubei.googleapis.com",
+        ],
     })
 
+    # Protected AI destinations win over user direct exceptions. YouTube is
+    # not included in this focused list, so it stays on the regular route.
     if warp_settings:
         rules.append({
             "type": "field",
@@ -1315,6 +1330,13 @@ def generate_final_config(
             "outboundTag": "warp-proxy",
             "domain": warp_domains
         })
+
+    rules.append({
+        "type": "field",
+        "inboundTag": ["socks-in", "http-in"],
+        "outboundTag": "direct",
+        "domain": direct_domains
+    })
 
     rules.append({
         "type": "field",
@@ -1594,12 +1616,12 @@ def generate_tun_config(route_exclude_addresses=None, interface_name=None):
                     "action": "route",
                     "outbound": "direct",
                 },
-                *forced_vpn_rules,
-                *direct_app_rules,
                 {
-                    # Model backends add and rotate hosts, so domain lists are
-                    # not enough. The desktop app starts helper/node
-                    # processes with changing names. Match processes and directories:
+                    # Antigravity is a protected two-hop application. These
+                    # rules must precede user xray/direct lists: users often
+                    # add Antigravity.exe to vpn_apps.txt, which previously
+                    # diverted the main process around WARP while its helpers
+                    # still used WARP, giving Google two exit IP addresses.
                     "process_name": [
                         "Antigravity.exe",
                         "language_server.exe",
@@ -1619,6 +1641,8 @@ def generate_tun_config(route_exclude_addresses=None, interface_name=None):
                     "action": "route",
                     "outbound": "xray-warp-out",
                 },
+                *forced_vpn_rules,
+                *direct_app_rules,
                 {
                     # Keep this after application rules: an excluded program
                     # that sends DNS itself must also bypass the VPN.
