@@ -2891,6 +2891,12 @@ if __name__ == "__main__":
         app = QApplication(sys.argv)
         app.setStyle("Fusion")
         app.setPalette(QPalette(QColor("#F2F2F7")))
+        if "--smoke-test" in sys.argv:
+            # Packaging check used before publishing a release. It verifies
+            # Python/PyQt imports and QApplication startup without touching
+            # the instance lock, user proxy settings, Xray or the TUN.
+            QTimer.singleShot(0, app.quit)
+            sys.exit(app.exec())
         instance_lock = QLockFile(os.path.join(APP_DIR, "gibvpn.lock"))
         # An elevated replacement can start a fraction earlier than the old
         # process releases its lock.  Give that intentional hand-off time.
