@@ -549,6 +549,19 @@ class SettingsDialog(QDialog):
         self.lbl_connection_mode.setStyleSheet("color: #475569;")
         form_misc.addRow("Подключение:", self.lbl_connection_mode)
 
+        self.chk_finals_split = QCheckBox("THE FINALS: уменьшить задержку")
+        self.chk_finals_split.setChecked(self.parent_app.finals_split_enabled)
+        self.chk_finals_split.setToolTip(
+            "В режиме «Полный VPN»: вход и службы через выбранный VPN, "
+            "игровой обмен напрямую. Применится при следующем подключении."
+        )
+        self.chk_finals_split.toggled.connect(self.parent_app.set_finals_split_enabled)
+        form_misc.addRow(self.chk_finals_split)
+        self.lbl_finals_split = QLabel("Вход через VPN, матч напрямую. Для следующего подключения.")
+        self.lbl_finals_split.setWordWrap(True)
+        self.lbl_finals_split.setStyleSheet("color: #475569;")
+        form_misc.addRow(self.lbl_finals_split)
+
         self.btn_import_warp = QPushButton("Импортировать личный WARP-профиль")
         self.btn_import_warp.setToolTip("Выберите wgcf-profile.conf. Ключ останется только на этом компьютере.")
         self.btn_import_warp.clicked.connect(self.import_warp_profile)
@@ -1499,13 +1512,13 @@ class ServerListDialog(QDialog):
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setDefaultSectionSize(30)
         self.table.verticalHeader().setVisible(False)
-        self.table.doubleClicked.connect(self.toggle_favorite_row)
+        self.table.doubleClicked.connect(self.connect_double_clicked)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         self._fill_table()
         layout.addWidget(self.table)
 
-        hint = QLabel("Двойной клик — ★ избранное  •  правый клик — меню  •  Ctrl/Shift — выбрать несколько")
+        hint = QLabel("Двойной клик — подключиться  •  ★ — отдельной кнопкой  •  Ctrl/Shift — выбрать несколько")
         hint.setStyleSheet("color: #8E8E93; font-size: 12px;")
         layout.addWidget(hint)
 
@@ -1923,23 +1936,20 @@ class ServerListDialog(QDialog):
         self.parent_app.log(f"Изменён статус {len(indices)} серверов -> {state}")
         self._fill_table()
 
+    def connect_double_clicked(self, index):
+        if index.isValid():
+            self.table.selectRow(index.row())
+            self.connect_selected()
+
     def connect_selected(self):
         idx = self._selected_index()
         if idx is None:
             return
         srv = self.servers[idx]
-        sub = self.parent_app._active_subscription()
-        if sub:
-            key = builder.server_key(srv)
-            self.parent_app._set_server_state(sub, key, "favorite")
-        self.parent_app.save_settings()
         name = self._server_display_name(idx)
-        self.parent_app.log(f"Сервер #{idx} ({name}) выбран для подключения (★ Избранное)")
-        self.accept()
-        if self.parent_app.is_running:
-            self.parent_app.log("Переподключение к выбранному серверу...")
-            self.parent_app.stop_vpn()
-        self.parent_app._start_current_mode()
+        self.parent_app.log(f"Подключение сразу к серверу #{idx} ({name})")
+        if self.parent_app.connect_server(srv, idx):
+            self.accept()
 
     def add_custom_server(self):
         text, ok = QInputDialog.getText(

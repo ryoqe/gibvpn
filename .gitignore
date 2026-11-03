@@ -14,6 +14,10 @@ screenshot_tool.py
 
 # Internal dev tests & scratch files
 tests/
+!tests/
+tests/*
+!tests/test_ai_routing.py
+!tests/run_isolated.py
 scratch/
 
 # Bundled binaries & large assets (downloaded on build/first run)

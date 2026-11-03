@@ -10,6 +10,9 @@ import shutil
 import time
 import traceback
 import hashlib
+import json
+import socket
+import ipaddress
 
 # PyInstaller sets sys.stdout/sys.stderr to None for windowed apps.
 if sys.stdout is None:
@@ -59,6 +62,8 @@ def sync_warp_domains(app_data_dir):
         "geosite:google-gemini",
         "domain:gemini.com",
         "domain:gemini.google.com",
+        "domain:flow.google.com",
+        "domain:labs.google",
         "domain:bard.google.com",
         "domain:aistudio.google.com",
         "domain:makersuite.google.com",
@@ -143,7 +148,8 @@ def get_app_dir():
 def _copy_if_changed(src, dst):
     """Atomically refresh an embedded helper while preserving equal files."""
     if not os.path.isfile(src):
-        return
+        return False
+    temp_path = None
     try:
         if os.path.isfile(dst) and os.path.getsize(src) == os.path.getsize(dst):
             def digest(path):
@@ -153,31 +159,67 @@ def _copy_if_changed(src, dst):
                         value.update(chunk)
                 return value.digest()
             if digest(src) == digest(dst):
-                return
+                return True
         os.makedirs(os.path.dirname(dst), exist_ok=True)
-        temp_path = dst + ".new"
+        temp_path = dst + f".{os.getpid()}.new"
         shutil.copy2(src, temp_path)
         os.replace(temp_path, dst)
+        return True
     except OSError:
         # If security software locks an old helper, keep the usable copy and
         # retry automatically on the next launch.
         try:
-            os.remove(dst + ".new")
+            if temp_path:
+                os.remove(temp_path)
         except OSError:
             pass
+        return False
 
 
 def _sync_embedded_tree(src_root, dst_root):
     if not os.path.isdir(src_root):
-        return
+        return True
+    complete = True
     for root, _dirs, files in os.walk(src_root):
         relative = os.path.relpath(root, src_root)
         target_root = dst_root if relative == "." else os.path.join(dst_root, relative)
         for filename in files:
-            _copy_if_changed(
+            complete = _copy_if_changed(
                 os.path.join(root, filename),
                 os.path.join(target_root, filename),
-            )
+            ) and complete
+    return complete
+
+
+def _bundle_cache_valid(app_dir, bundle_id):
+    """Stat unchanged helpers instead of hashing large engines at every launch."""
+    try:
+        with open(os.path.join(app_dir, 'embedded_helpers.json'), encoding='utf-8') as f:
+            cache = json.load(f)
+        if cache.get('bundle') != bundle_id or not cache.get('files'):
+            return False
+        for name, stamp in cache['files'].items():
+            stat = os.stat(os.path.join(app_dir, name))
+            if [stat.st_size, stat.st_mtime_ns] != stamp:
+                return False
+        return os.path.isfile(os.path.join(app_dir, 'xray.exe'))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
+def _save_bundle_cache(app_dir, meipass, bundle_id, immutable_helpers):
+    names = [name for name in immutable_helpers if os.path.isfile(os.path.join(meipass, name))]
+    for dirname in ('singbox_bin', 'zapret_bin', 'assets'):
+        for root, _dirs, files in os.walk(os.path.join(meipass, dirname)):
+            names.extend(os.path.relpath(os.path.join(root, name), meipass) for name in files)
+    stamps = {}
+    for name in names:
+        stat = os.stat(os.path.join(app_dir, name))
+        stamps[name] = [stat.st_size, stat.st_mtime_ns]
+    path = os.path.join(app_dir, 'embedded_helpers.json')
+    with open(path + '.tmp', 'w', encoding='utf-8') as f:
+        json.dump({'bundle': bundle_id, 'files': stamps}, f)
+    os.replace(path + '.tmp', path)
 
 
 def get_work_dir(app_dir):
@@ -191,6 +233,11 @@ def get_work_dir(app_dir):
     """
     meipass = getattr(sys, '_MEIPASS', None)
     if meipass and os.path.exists(os.path.join(meipass, "xray.exe")):
+        bundle_stat = os.stat(sys.executable)
+        bundle_id = [os.path.abspath(sys.executable), bundle_stat.st_size, bundle_stat.st_mtime_ns]
+        if _bundle_cache_valid(app_dir, bundle_id):
+            return app_dir
+        complete = True
         immutable_helpers = [
             'xray.exe', 'geoip.dat', 'geosite.dat',
             'ofont.ru_Zeequada.ttf',
@@ -198,7 +245,8 @@ def get_work_dir(app_dir):
         for name in immutable_helpers:
             src = os.path.join(meipass, name)
             dst = os.path.join(app_dir, name)
-            _copy_if_changed(src, dst)
+            if os.path.isfile(src):
+                complete = _copy_if_changed(src, dst) and complete
 
         # User-editable rules are initial defaults, never overwrite them.
         for name in ('direct_domains.txt', 'direct_apps.txt', 'vpn_apps.txt', 'warp_domains.txt'):
@@ -210,10 +258,16 @@ def get_work_dir(app_dir):
         # Refresh bundled engines/assets recursively. Private WARP profiles and
         # subscription caches are deliberately never embedded or overwritten.
         for dirname in ('singbox_bin', 'zapret_bin', 'assets'):
-            _sync_embedded_tree(
+            complete = _sync_embedded_tree(
                 os.path.join(meipass, dirname),
                 os.path.join(app_dir, dirname),
-            )
+            ) and complete
+
+        if complete:
+            try:
+                _save_bundle_cache(app_dir, meipass, bundle_id, immutable_helpers)
+            except OSError:
+                pass
 
         if os.path.exists(os.path.join(app_dir, "xray.exe")):
             return app_dir
@@ -349,12 +403,14 @@ def wait_for_local_port(port, host="127.0.0.1", timeout=5.0):
     return False
 
 
-def find_free_local_port_block():
+def find_free_local_port_block(preferred=None):
     """Reserve a collision-free Xray listener block without killing other VPNs."""
     import socket
 
-    for base in (10808, 11808, 12808, 13808, 20808, 21808, 30808):
-        ports = (base, base + 1, base + 2, base + 3, base + 77)
+    candidates = ((10808, 11808, 12808, 13808, 20808, 21808, 30808)
+                  if preferred is None else range(int(preferred), 64000, 100))
+    for base in candidates:
+        ports = (base, base + 1, base + 2, base + 3, base + 4, base + 77)
         sockets = []
         try:
             for port in ports:
@@ -922,6 +978,52 @@ LOG_PATH = os.path.join(APP_DIR, "gibvpn_error.log")
 MAX_LOG_BYTES = 5 * 1024 * 1024  # rotate the error log past 5 MB
 
 
+def write_session_log(message):
+    """Keep startup diagnostics without subscription URLs or access links."""
+    import re
+    path = os.path.join(APP_DIR, 'session.log')
+    safe = re.sub(r'(?i)\b(?:https?|vless|vmess|trojan|ss)://\S+', '[address omitted]', str(message))
+    try:
+        if os.path.exists(path) and os.path.getsize(path) > 2 * 1024 * 1024:
+            os.replace(path, path + '.previous')
+        with open(path, 'a', encoding='utf-8') as handle:
+            handle.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {safe}\n")
+    except OSError:
+        pass
+
+
+def write_runtime_info():
+    """Readable even when Windows hides the elevated process's image path."""
+    info = {
+        'version': CURRENT_APP_VERSION, 'pid': os.getpid(),
+        'executable': os.path.abspath(sys.executable), 'started_at': time.time(),
+    }
+    path = os.path.join(APP_DIR, 'runtime.json')
+    try:
+        with open(path + '.tmp', 'w', encoding='utf-8') as handle:
+            json.dump(info, handle, ensure_ascii=False, indent=2)
+        os.replace(path + '.tmp', path)
+    except OSError:
+        pass
+
+
+def wait_for_network_ready(timeout=20):
+    """Wait for a non-APIPA source address in a worker, without sending packets."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.connect(('1.1.1.1', 53))
+                address = ipaddress.ip_address(probe.getsockname()[0])
+                if not (address.is_link_local or address.is_loopback or address.is_unspecified):
+                    return True
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.5)
+
+
 def log_exception(msg):
     try:
         if os.path.getsize(LOG_PATH) > MAX_LOG_BYTES:
@@ -1433,7 +1535,7 @@ def emergency_fix_internet():
     return True, log_lines
 
 
-CURRENT_APP_VERSION = "3.0.43"
+CURRENT_APP_VERSION = "3.0.47"
 
 
 def is_newer_version(candidate, current):

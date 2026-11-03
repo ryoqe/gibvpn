@@ -8,6 +8,8 @@ domain:rutracker.org
 geosite:google-gemini
 domain:gemini.com
 domain:gemini.google.com
+domain:flow.google.com
+domain:labs.google
 domain:bard.google.com
 domain:aistudio.google.com
 domain:makersuite.google.com

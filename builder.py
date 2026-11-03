@@ -9,6 +9,9 @@ import ipaddress
 import socket
 import uuid
 import subprocess
+import queue
+import threading
+import time
 
 from appcore import WORK_DIR, get_device_hwid
 
@@ -18,19 +21,26 @@ HTTP_PORT = 10809
 WARP_SOCKS_PORT = 10810
 WARP_HTTP_PORT = 10811
 XRAY_API_PORT = 10085
+GAMES_SOCKS_PORT = 10812
 SINGBOX_TUN_CONFIG = "singbox_tun.json"
 TUN_MTU = 1400
+
+# Steam remains a direct application, but its S3 cloud downloads timed out
+# on that path. A live retry through the selected VPN completed successfully.
+STEAM_CLOUD_S3_REGEX = r"(?i)^steamcloud[^.]*\.s3([.-][a-z0-9-]+)*\.amazonaws\.com$"
+FINALS_PROCESS_PATH_REGEX = r"(?i)[\\/]the finals[\\/].*discovery\.exe$"
 
 
 def configure_local_ports(base_port):
     """Set the private listener block selected before Xray starts."""
-    global SOCKS_PORT, HTTP_PORT, WARP_SOCKS_PORT, WARP_HTTP_PORT, XRAY_API_PORT
+    global SOCKS_PORT, HTTP_PORT, WARP_SOCKS_PORT, WARP_HTTP_PORT, XRAY_API_PORT, GAMES_SOCKS_PORT
     base_port = int(base_port)
     SOCKS_PORT = base_port
     HTTP_PORT = base_port + 1
     WARP_SOCKS_PORT = base_port + 2
     WARP_HTTP_PORT = base_port + 3
     XRAY_API_PORT = base_port + 77
+    GAMES_SOCKS_PORT = base_port + 4
 
 # ChatGPT uses more than one first-party hostname.  Keep this list in one
 # place so routing rules and diagnostics describe the same traffic class.
@@ -1095,28 +1105,36 @@ def get_warp_settings(profile_path=None):
         return None
 
 
-def _resolved_ip(host):
+_DNS_CACHE = {}
+
+
+def _resolved_ip(host, timeout=5.0):
     """Resolve a tunnel endpoint before Windows routes are changed."""
     value = str(host or "").strip().strip("[]")
-    if value == "engage.cloudflareclient.com":
-        try:
-            answers = socket.getaddrinfo(value, None, family=socket.AF_INET, type=socket.SOCK_STREAM)
-            if answers:
-                return answers[0][4][0]
-        except OSError:
-            return "162.159.192.1"
     try:
         ipaddress.ip_address(value)
         return value
     except ValueError:
         pass
+    cached = _DNS_CACHE.get(value)
+    if cached and time.monotonic() - cached[0] < 60:
+        return cached[1]
+    result = queue.Queue(maxsize=1)
+    def resolve():
+        try:
+            answers = socket.getaddrinfo(value, None, family=socket.AF_INET, type=socket.SOCK_STREAM)
+            result.put(answers[0][4][0] if answers else None)
+        except OSError:
+            result.put(None)
+    threading.Thread(target=resolve, daemon=True).start()
     try:
-        answers = socket.getaddrinfo(
-            value, None, family=socket.AF_INET, type=socket.SOCK_STREAM
-        )
-        return answers[0][4][0] if answers else value
-    except OSError:
-        return value
+        address = result.get(timeout=timeout)
+    except queue.Empty:
+        address = None
+    if address:
+        _DNS_CACHE[value] = (time.monotonic(), address)
+        return address
+    return "162.159.192.1" if value == "engage.cloudflareclient.com" else value
 
 
 def resolved_server_address(server):
@@ -1158,8 +1176,15 @@ def _pin_wireguard_endpoint(warp_settings):
 
 def generate_final_config(
     best_server, use_zapret=False, block_quic=True,
-    resolve_endpoints=False,
+    resolve_endpoints=False, warp_enabled=True, config_path=None, local_port_base=None,
+    finals_split_enabled=False,
 ):
+    # Disposable probes supply their own path/ports without changing the live
+    # listener globals or overwriting the connection's config.json.
+    ports = (SOCKS_PORT, HTTP_PORT, WARP_SOCKS_PORT, WARP_HTTP_PORT, XRAY_API_PORT)
+    if local_port_base is not None:
+        ports = tuple(local_port_base + offset for offset in (0, 1, 2, 3, 77))
+    games_port = GAMES_SOCKS_PORT if local_port_base is None else local_port_base + 4
     direct_domains = [
         "domain:ru", "domain:рф", "domain:xn--p1ai",
         "domain:ру", "domain:xn--p1ag",
@@ -1219,6 +1244,8 @@ def generate_final_config(
         "domain:ai.com",
         "domain:gemini.com",
         "domain:gemini.google.com",
+        "domain:flow.google.com",
+        "domain:labs.google",
         "domain:bard.google.com",
         "domain:aistudio.google.com",
         "domain:makersuite.google.com",
@@ -1275,7 +1302,7 @@ def generate_final_config(
         if resolve_endpoints else copy.deepcopy(best_server)
     )
     best_server["tag"] = "best-proxy"
-    warp_settings = get_warp_settings()
+    warp_settings = get_warp_settings() if warp_enabled else None
     if warp_settings:
         warp_settings = _pin_wireguard_endpoint(warp_settings)
 
@@ -1304,6 +1331,21 @@ def generate_final_config(
         },
     ]
 
+    if finals_split_enabled:
+        # Force game service requests through the selected VPN, without WARP
+        # or domain/direct exceptions. Gameplay UDP never enters this listener.
+        rules.insert(1, {
+            "type": "field", "inboundTag": ["games-socks-in"],
+            "outboundTag": "best-proxy", "network": "tcp,udp",
+        })
+
+    # Health probes must measure the base VPN, before broad AI/WARP and user
+    # direct rules; a WARP failure must not masquerade as a dead VPN server.
+    rules.append({
+        "type": "field", "inboundTag": ["socks-in", "http-in"],
+        "outboundTag": "best-proxy", "domain": BASE_HEALTH_DOMAINS,
+    })
+
     # Keep YouTube on one regular route even though its API hostname lives
     # below googleapis.com. This lets the rest of Google/Gemini APIs use WARP
     # without splitting YouTube media across two exits.
@@ -1321,13 +1363,21 @@ def generate_final_config(
         ],
     })
 
+    # Keep cloud file transfers on the selected VPN even if an application or
+    # broad Amazon domain is excluded. Dedicated WARP listeners still win.
+    rules.append({
+        "type": "field",
+        "inboundTag": ["socks-in", "http-in"],
+        "outboundTag": "best-proxy",
+        "domain": ["regexp:" + STEAM_CLOUD_S3_REGEX],
+    })
+
     # Protected AI destinations win over user direct exceptions. YouTube is
     # not included in this focused list, so it stays on the regular route.
-    if warp_settings:
-        rules.append({
+    rules.append({
             "type": "field",
             "inboundTag": ["socks-in", "http-in"],
-            "outboundTag": "warp-proxy",
+            "outboundTag": "warp-proxy" if warp_settings else "best-proxy",
             "domain": warp_domains
         })
 
@@ -1336,13 +1386,6 @@ def generate_final_config(
         "inboundTag": ["socks-in", "http-in"],
         "outboundTag": "direct",
         "domain": direct_domains
-    })
-
-    rules.append({
-        "type": "field",
-        "inboundTag": ["socks-in", "http-in"],
-        "outboundTag": "best-proxy",
-        "domain": BASE_HEALTH_DOMAINS,
     })
 
     if direct_apps:
@@ -1447,7 +1490,14 @@ def generate_final_config(
         }
     }
 
-    config_path = os.path.join(WORK_DIR, 'config.json')
+    for inbound, port in zip(config["inbounds"], ports):
+        inbound["port"] = port
+    if finals_split_enabled:
+        config["inbounds"].append({
+            "tag": "games-socks-in", "listen": "127.0.0.1", "port": games_port,
+            "protocol": "socks", "settings": {"udp": False},
+        })
+    config_path = config_path or os.path.join(WORK_DIR, 'config.json')
     with open(config_path, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=2)
 
@@ -1482,7 +1532,7 @@ def get_physical_default_gateway():
     return None
 
 
-def generate_tun_config(route_exclude_addresses=None, interface_name=None):
+def generate_tun_config(route_exclude_addresses=None, interface_name=None, finals_split_enabled=False):
     """Generate a full-device TUN config that forwards every packet to Xray.
 
     Xray still owns server selection and transport.  sing-box only creates the
@@ -1627,8 +1677,6 @@ def generate_tun_config(route_exclude_addresses=None, interface_name=None):
                         "language_server.exe",
                         "agy.exe",
                         "agy-node.exe",
-                        "node.exe",
-                        "code.exe",
                     ],
                     "action": "route",
                     "outbound": "xray-warp-out",
@@ -1640,6 +1688,20 @@ def generate_tun_config(route_exclude_addresses=None, interface_name=None):
                     ],
                     "action": "route",
                     "outbound": "xray-warp-out",
+                },
+                {
+                    # Application exclusions used to route Steam before its
+                    # TLS hostname was known. Recover SNI first so the narrow
+                    # cloud exception can take precedence over Steam direct.
+                    "network": "tcp",
+                    "port": 443,
+                    "action": "sniff",
+                    "timeout": "300ms",
+                },
+                {
+                    "domain_regex": [STEAM_CLOUD_S3_REGEX],
+                    "action": "route",
+                    "outbound": "xray-out",
                 },
                 *forced_vpn_rules,
                 *direct_app_rules,
@@ -1661,6 +1723,20 @@ def generate_tun_config(route_exclude_addresses=None, interface_name=None):
             "final": "xray-out",
         },
     }
+    if finals_split_enabled:
+        finals_match = {"process_path_regex": [FINALS_PROCESS_PATH_REGEX]}
+        # Keep game DNS inside the VPN. Only this game's UDP bypasses the
+        # tunnel, including UDP/443 which the general QUIC rule rejects.
+        config["route"]["rules"][0:0] = [
+            {**finals_match, "port": 53, "action": "hijack-dns"},
+            {**finals_match, "network": "udp", "action": "route", "outbound": "direct"},
+            {**finals_match, "network": "tcp", "action": "route", "outbound": "games-vpn-out"},
+        ]
+        config["dns"]["rules"].insert(0, {**finals_match, "server": "remote-dns"})
+        config["outbounds"].append({
+            "type": "socks", "tag": "games-vpn-out",
+            "server": "127.0.0.1", "server_port": GAMES_SOCKS_PORT,
+        })
     exclusions = []
     all_exclude_addrs = list(route_exclude_addresses or [])
     if gateway_ip and gateway_ip not in all_exclude_addrs:

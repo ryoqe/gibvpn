@@ -3,7 +3,7 @@
 Автоматическая сборка GibVPN_Smart_v3.exe.
 
 Что делает:
-  1. Убивает запущенные копии GibVPN_Smart_v3.exe (чтобы не было блокировки файла).
+  1. Оставляет запущенное приложение и VPN работать.
   2. Запускает no-xray тесты.
   3. Пересобирает exe через PyInstaller.
   4. Запускает тесты ещё раз после сборки.
@@ -37,21 +37,6 @@ def run(cmd, **kwargs):
     print(f"\n>>> {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=WORK_DIR, text=True, **kwargs)
     return result
-
-
-def kill_running_exe():
-    print("Killing running instances of the app...")
-    if sys.platform == "win32":
-        subprocess.run(
-            ["taskkill", "/F", "/IM", EXE_NAME],
-            capture_output=True,
-            shell=False,
-        )
-    else:
-        subprocess.run(
-            ["pkill", "-f", EXE_NAME],
-            capture_output=True,
-        )
 
 
 def ensure_xray():
@@ -99,7 +84,7 @@ def run_tests():
     env = os.environ.copy()
     env["QT_QPA_PLATFORM"] = "offscreen"
     result = run(
-        [sys.executable, "tests/test_no_xray.py", "-v"],
+        [sys.executable, "tests/run_isolated.py"],
         env=env,
     )
     if result.returncode != 0:
@@ -109,22 +94,13 @@ def run_tests():
 
 
 def build_exe():
-    # Remove old dist exe if locked
+    # Never stop a running app to unlock its binary. Use another destination.
     if os.path.exists(DIST_EXE):
         try:
-            os.remove(DIST_EXE)
+            with open(DIST_EXE, "r+b"):
+                pass
         except OSError:
-            try:
-                temp_old = DIST_EXE + ".old"
-                if os.path.exists(temp_old):
-                    try:
-                        os.remove(temp_old)
-                    except OSError:
-                        pass
-                os.replace(DIST_EXE, temp_old)
-                print(f"Renamed locked {DIST_EXE} to {temp_old}")
-            except OSError:
-                kill_running_exe()
+            raise RuntimeError("EXE занят. Соберите в другую папку через PyInstaller --distpath.")
 
     result = run(
         [sys.executable, "-m", "PyInstaller", "GibVPN_Smart_v3.spec", "--noconfirm", "--clean"],
@@ -148,13 +124,25 @@ def update_previews():
         print("Live settings_preview.png verified.")
 
 
+def smoke_test_exe():
+    """Check the packaged runtime using disposable data and no VPN startup."""
+    with tempfile.TemporaryDirectory(prefix="gibvpn_build_smoke_") as tmp:
+        env = os.environ.copy()
+        env.update(APPDATA=tmp, LOCALAPPDATA=tmp, QT_QPA_PLATFORM="offscreen")
+        result = subprocess.run(
+            [DIST_EXE, "--smoke-test"], env=env, timeout=45,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode:
+            raise RuntimeError(f"EXE startup check failed: {result.returncode}")
+
+
 def main():
     os.chdir(WORK_DIR)
-    kill_running_exe()
     ensure_xray()
     run_tests()
     build_exe()
-    run_tests()
+    smoke_test_exe()
     update_previews()
     print("\n=== BUILD SUCCESS ===")
     print(f"Output: {DIST_EXE}")

@@ -12,3 +12,6 @@ C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive\ga
 C:\Users\merka\AppData\Roaming\.tlauncher\legacy\Minecraft\LL.exe
 C:\Users\merka\AppData\Roaming\.tlauncher\legacy\Minecraft\jre\x64\bin\javaw.exe
 C:\Users\merka\servak\TrailerCraft-26.1.2\SERVER-WINDOWS\runtime\current\bin\javaw.exe
+
+# Deadlock
+C:\Program Files (x86)\Steam\steamapps\common\Deadlock\game\bin\win64\deadlock.exe

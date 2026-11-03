@@ -10,7 +10,11 @@ import winreg
 import uuid
 import socket
 import tempfile
+import ipaddress
 from concurrent.futures import ThreadPoolExecutor
+from ai_probe import (FLOW_URL, flow_response_result, omni_available,
+                      omni_set_provider_proxy, omni_restore_proxy,
+                      omni_reset_cooldown, omni_e2e_check)
 
 import builder
 import appcore
@@ -72,7 +76,7 @@ class GibVPNApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("GibVPN - Smart Core")
+        self.setWindowTitle(f"GibVPN {appcore.CURRENT_APP_VERSION}")
         self.resize(1120, 680)
         self.setMinimumSize(940, 560)
 
@@ -81,6 +85,15 @@ class GibVPNApp(QMainWindow):
         self.tun_process = None
         self._xray_processes = set()
         self.current_mode = "min"
+        self.warp_enabled = True
+        self.finals_split_enabled = False
+        self.manual_server = None
+        self.last_connection = {}
+        self._active_server = None
+        self._active_server_index = 0
+        self.ai_last_servers = {}
+        self._ai_probe_ports = set()
+        self._ai_probe_lock = threading.Lock()
         self._traffic_up = 0
         self._traffic_down = 0
         self._traffic_up_speed = 0.0
@@ -189,6 +202,8 @@ class GibVPNApp(QMainWindow):
         self._sub_timer.timeout.connect(self._maybe_auto_update_sub)
         self._sub_timer.start(15 * 60 * 1000)
 
+        appcore.write_runtime_info()
+        self.log(f"GibVPN {appcore.CURRENT_APP_VERSION} · PID {os.getpid()} · {sys.executable}")
         self.log(f"Application started. Work dir: {WORK_DIR}")
         if not os.path.exists("xray.exe"):
             self.log("WARNING: xray.exe not found in work dir!")
@@ -399,7 +414,8 @@ class GibVPNApp(QMainWindow):
         status_layout.setContentsMargins(0, 0, 0, 0)
         status_layout.setSpacing(6)
 
-        self.status_title = QLabel("СТАТУС")
+        self.status_title = QLabel(f"GibVPN {appcore.CURRENT_APP_VERSION} · СТАТУС")
+        self.status_title.setToolTip(f"Запущено из: {os.path.abspath(sys.executable)}")
         self.status_title.setStyleSheet(
             "color: #D8D8DE; font-size: 12px; font-weight: bold; letter-spacing: 1px;"
             "background-color: rgba(0,0,0,110); border-radius: 10px; padding: 4px 10px;"
@@ -467,13 +483,13 @@ class GibVPNApp(QMainWindow):
 
         mode_btn_size = 72
         small_btn_h = 44
-        group_gap = 25
+        group_gap = 0
 
         self.bottom_panel = QWidget(self.central)
         self.bottom_panel.setStyleSheet("background-color: transparent;")
         self.bottom_layout = QHBoxLayout(self.bottom_panel)
         self.bottom_layout.setContentsMargins(0, 0, 0, 0)
-        self.bottom_layout.setSpacing(10)
+        self.bottom_layout.setSpacing(6)
 
         self.btn_min = QPushButton("МИН", self.bottom_panel)
         self.btn_min.setFixedSize(mode_btn_size, mode_btn_size)
@@ -497,10 +513,21 @@ class GibVPNApp(QMainWindow):
         self.btn_auto.setFixedSize(mode_btn_size, mode_btn_size)
         self.btn_auto.setStyleSheet(self._round_btn_style(selected=False))
         self.btn_auto.setToolTip(
-            "Подобрать сервер для ИИ: проверить Gemini, NotebookLM, "
-            "доступность сайтов и скорость"
+            "Найти сервер для Gemini по реальному доступу к flow.google.com. "
+            "Региональная заглушка означает, что сервер не подходит."
         )
         self.btn_auto.clicked.connect(self.on_auto_clicked)
+
+        self.btn_warp = QPushButton(self.bottom_panel)
+        self.btn_warp.setCheckable(True)
+        self.btn_warp.setFixedSize(90, small_btn_h)
+        self.btn_warp.setStyleSheet(self._pill_btn_style())
+        self.btn_warp.setToolTip(
+            "Включить или отключить Cloudflare WARP для ИИ и Antigravity. "
+            "Без WARP используется выбранный VPN-сервер."
+        )
+        self.btn_warp.clicked.connect(self.set_warp_enabled)
+        self._update_warp_button()
 
         self.btn_ping = QPushButton("ПИНГ", self.bottom_panel)
         self.btn_ping.setFixedSize(95, small_btn_h)
@@ -512,6 +539,7 @@ class GibVPNApp(QMainWindow):
         self.bottom_layout.addWidget(self.btn_max)
         self.bottom_layout.addWidget(self.btn_speed)
         self.bottom_layout.addWidget(self.btn_auto)
+        self.bottom_layout.addWidget(self.btn_warp)
         self.bottom_layout.addSpacing(group_gap)
         self.bottom_layout.addWidget(self.btn_ping)
         self.bottom_layout.addStretch(1)
@@ -548,6 +576,7 @@ class GibVPNApp(QMainWindow):
         self.setFont(font)
 
     def log(self, message):
+        appcore.write_session_log(message)
         self.log_signal.emit(str(message))
 
     def _log_slot(self, message):
@@ -656,8 +685,45 @@ class GibVPNApp(QMainWindow):
         self.btn_auto.setStyleSheet(self._round_btn_style(selected=(self.current_mode == "auto")))
 
     def _set_mode_buttons_enabled(self, enabled):
-        for button in (self.btn_min, self.btn_max, self.btn_speed, self.btn_auto):
+        for button in (self.btn_min, self.btn_max, self.btn_speed, self.btn_auto, self.btn_warp):
             button.setEnabled(enabled)
+
+    def _update_warp_button(self):
+        self.btn_warp.setChecked(self.warp_enabled)
+        self.btn_warp.setText("WARP ВКЛ" if self.warp_enabled else "WARP ВЫКЛ")
+
+    def set_warp_enabled(self, enabled):
+        self.warp_enabled = bool(enabled)
+        self._update_warp_button()
+        self.save_settings()
+        self.log(f"[WARP] {'Включён' if self.warp_enabled else 'Выключен'}")
+        if self.is_running and self._active_server:
+            server, index = self._active_server, self._active_server_index
+            self.stop_vpn()
+            self._run_vpn_worker(lambda: self._start_best_server(server, index, 0))
+
+    def set_finals_split_enabled(self, enabled):
+        """Save the next connection's game profile without touching a live match."""
+        self.finals_split_enabled = bool(enabled)
+        self.save_settings()
+        state = "Включён" if self.finals_split_enabled else "Выключен"
+        self.log(f"[THE FINALS] {state}; применится при следующем подключении полного VPN")
+
+    def connect_server(self, server, index=0):
+        """Connect to exactly this server; never enter automatic selection."""
+        if getattr(self, "_worker", None) and self._worker.isRunning():
+            self.log("[UI] Дождитесь завершения текущего подключения")
+            return False
+        self.manual_server = server
+        self._servers = [server]
+        self.save_settings()
+        if self.is_running:
+            self.stop_vpn()
+        if self.connection_mode == "tun" and not appcore.is_windows_admin():
+            self._restart_for_tun_admin(start_vpn=True)
+            return True
+        self._run_vpn_worker(lambda: self._start_best_server(server, index, 0))
+        return True
 
     @staticmethod
     def _connection_mode_button_style(selected):
@@ -750,51 +816,85 @@ class GibVPNApp(QMainWindow):
         elif was_running:
             QTimer.singleShot(200, self._start_current_mode)
 
-    def _start_current_mode(self):
-        if self.current_mode == "max":
-            self._run_vpn_worker(self.smart_start_max_availability)
+    def _start_current_mode(self, resume_last=True):
+        if self.manual_server:
+            server = self.manual_server
+            self._servers = [server]
+            self._run_vpn_worker(lambda: self._start_best_server(server, 0, 0))
+        elif self.current_mode == "max":
+            self._run_vpn_worker(lambda: self._resume_last_or_select(self.smart_start_max_availability) if resume_last else self.smart_start_max_availability())
         elif self.current_mode == "speed":
-            self._run_vpn_worker(self.smart_start_speed)
+            self._run_vpn_worker(lambda: self._resume_last_or_select(self.smart_start_speed) if resume_last else self.smart_start_speed())
         elif self.current_mode == "auto":
             self._run_vpn_worker(self.smart_start_auto)
         else:
-            self._run_vpn_worker(self.smart_start_vpn)
+            self._run_vpn_worker(lambda: self._resume_last_or_select(self.smart_start_vpn) if resume_last else self.smart_start_vpn())
+
+    def _resume_last_or_select(self, select):
+        """Ordinary Start resumes a known server; explicit AI keeps its own checks."""
+        self.set_status("Ожидаю готовность сети Windows…", "orange")
+        if not appcore.wait_for_network_ready():
+            raise RuntimeError("Windows ещё не подключился к сети. VPN не менял маршруты; повторите запуск после подключения сети.")
+        last = self.last_connection
+        if (last.get("mode") != self.current_mode or
+                last.get("connection_mode") != self.connection_mode):
+            select()
+            return
+        servers, sub = self._collect_servers_for_start()
+        for index, server in enumerate(servers or []):
+            key = builder.server_key(server)
+            if key != last.get("server_key") or self._server_state(sub, key) == "blocked":
+                continue
+            self.set_status("Подключаю последний рабочий сервер…", "orange")
+            try:
+                self._start_best_server(server, index, 0, verify_before_tun=True)
+                return
+            except Exception:
+                self.log("[START] Последний сервер недоступен; подбираю другой")
+                self._reap_xray(self.xray_process)
+                self.xray_process = None
+                break
+        select()
 
     def on_min_clicked(self):
+        self.manual_server = None
         self.current_mode = "min"
         self.save_settings()
         self._update_mode_buttons()
         self.log("Режим VPN: МИН (быстрый пинг)")
         if self.is_running:
             self.stop_vpn()
-            self._start_current_mode()
+            self._start_current_mode(resume_last=False)
 
     def on_max_clicked(self):
+        self.manual_server = None
         self.current_mode = "max"
         self.save_settings()
         self._update_mode_buttons()
         self.log("Режим VPN: МАКС (максимальная доступность)")
         if self.is_running:
             self.stop_vpn()
-            self._start_current_mode()
+            self._start_current_mode(resume_last=False)
 
     def on_speed_clicked(self):
+        self.manual_server = None
         self.current_mode = "speed"
         self.save_settings()
         self._update_mode_buttons()
         self.log("Режим VPN: СКОРОСТЬ (выбор самого быстрого)")
         if self.is_running:
             self.stop_vpn()
-            self._start_current_mode()
+            self._start_current_mode(resume_last=False)
 
     def on_auto_clicked(self):
+        self.manual_server = None
         self.current_mode = "auto"
         self.save_settings()
         self._update_mode_buttons()
-        self.log("Режим VPN: ИИ (Gemini, NotebookLM, доступность и скорость)")
+        self.log("Режим VPN: ИИ — поиск по доступу к Google Flow")
         if self.is_running:
             self.stop_vpn()
-            self._start_current_mode()
+        self._start_current_mode()
 
     def _run_vpn_worker(self, fn):
         self.set_toggle("СТОП", "#1F4E79", "#2A6299", False)
@@ -869,7 +969,7 @@ class GibVPNApp(QMainWindow):
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
         self._tray = QSystemTrayIcon(self._make_tray_icon(), self)
-        self._tray.setToolTip("GibVPN - Smart Core")
+        self._tray.setToolTip(f"GibVPN {appcore.CURRENT_APP_VERSION}")
 
         menu = QMenu()
         act_show = menu.addAction("Показать")
@@ -982,7 +1082,7 @@ class GibVPNApp(QMainWindow):
         if 0 < self._conn_ping_ms < 5000:
             ping_str = f"{self._conn_ping_ms}ms"
         elif self._conn_ping_ms == 0:
-            ping_str = "<10ms"
+            ping_str = "пинг не измерен"
         else:
             ping_str = ">5s"
         parts = [f"RUNNING • {name} • {ping_str}"]
@@ -1023,7 +1123,7 @@ class GibVPNApp(QMainWindow):
             self._xray_processes.add(proc)
         return proc
 
-    def _spawn_tun(self, route_exclude_addresses=None):
+    def _spawn_tun(self, route_exclude_addresses=None, finals_split_enabled=False):
         singbox_exe = appcore.find_singbox_exe()
         if not singbox_exe:
             raise RuntimeError("sing-box.exe не найден в папке программы")
@@ -1032,7 +1132,8 @@ class GibVPNApp(QMainWindow):
         # the next start fails before any server or mode is involved.
         interface_name = f"gibvpn-{uuid.uuid4().hex[:8]}"
         config_path = builder.generate_tun_config(
-            route_exclude_addresses, interface_name=interface_name
+            route_exclude_addresses, interface_name=interface_name,
+            finals_split_enabled=finals_split_enabled,
         )
         self.log(f"[TUN] Starting interface {interface_name}")
         proc = subprocess.Popen(
@@ -1194,8 +1295,6 @@ class GibVPNApp(QMainWindow):
         self.log("[CORE] Generating final routing config...")
         self._start_best_server(best_server, best_index, ping_ms)
 
-        if source == "favorite" and regular_pairs:
-            self._start_background_regular_test(regular_pairs, best_ping, mode="min")
 
     def smart_start_max_availability(self):
         try:
@@ -1287,8 +1386,6 @@ class GibVPNApp(QMainWindow):
         self.log("[CORE] Generating final routing config...")
         self._start_best_server(best_server, best_index, ping_ms)
 
-        if source == "favorite" and regular_pairs:
-            self._start_background_regular_test(regular_pairs, best_metric, mode="max")
 
     def smart_start_speed(self):
         try:
@@ -1400,74 +1497,78 @@ class GibVPNApp(QMainWindow):
         self._servers = servers
 
         favorites, regular, blocked = self._filter_servers(servers, sub)
-        candidates = [(i, s) for i, s in enumerate(servers) if s in favorites]
-        if not candidates:
-            candidates = [(i, s) for i, s in enumerate(servers) if s in regular]
-
-        if not candidates:
-            self.set_status("NO VALID SERVERS", "red")
+        allowed = [(i, srv) for i, srv in enumerate(servers)
+                   if srv in favorites or srv in regular]
+        if not allowed:
             self.is_running = False
+            self.set_status("НЕТ СЕРВЕРОВ ДЛЯ ИИ", "red")
             self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
             return
 
-        self.set_status(f"AI: TESTING {len(candidates)} SERVERS...", "orange")
-        self.log(f"[AI] Running AI-only test (Gemini + NotebookLM + availability + speed) for {len(candidates)} servers...")
-
-        avail_results = self._run_availability_test(candidates)
-        if not avail_results:
-            self.set_status("ALL SERVERS FAILED", "red")
+        route = "WARP" if self.warp_enabled else "без WARP"
+        if self.warp_enabled and not builder.get_warp_settings():
+            self.log("[AI] Профиль WARP не импортирован: отключите WARP или импортируйте профиль")
             self.is_running = False
+            self.set_status("НУЖЕН ПРОФИЛЬ WARP", "red")
             self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
             return
 
-        avail_results.sort(key=lambda x: (-x[1], x[2]))
-        top_candidates = avail_results[:3]
+        last = self.ai_last_servers.get(str(self.warp_enabled))
+        def priority(pair):
+            _, srv = pair
+            hint = (srv.get("remark") or "").casefold()
+            return (builder.server_key(srv) != last,
+                    not any(word in hint for word in ("gemini", "гемини", "google ai")),
+                    srv not in favorites)
+        allowed.sort(key=priority)
+        self.log(f"[AI] Проверяем Flow ({route}), серверов: {len(allowed)}. Название Gemini — только подсказка.")
+        # WireGuard identifies a peer by its key and learns its latest source
+        # endpoint. Concurrent tunnels with one WARP key can steal each other's
+        # return traffic. Only plain VPN probes can safely run in parallel.
+        batch_size = 1 if self.warp_enabled else 4
+        stage1_pass = []
+        with ThreadPoolExecutor(max_workers=batch_size) as pool:
+            for offset in range(0, len(allowed), batch_size):
+                batch = allowed[offset:offset + batch_size]
+                self.set_status(f"ИИ: FLOW {offset + 1}–{offset + len(batch)}/{len(allowed)}", "orange")
+                checks = list(pool.map(lambda pair: self._ai_route_works(pair[1]), batch))
+                for pair, usable in zip(batch, checks):
+                    if usable:
+                        stage1_pass.append(pair)
+                if stage1_pass:
+                    break
 
-        # Only the explicit AI mode performs service probes. MIN, MAX and
-        # SPEED never call this path; they retain their own independent
-        # ping/availability/throughput selection logic.
-        self.set_status(f"AI: CHECKING WARP ON {len(top_candidates)} SERVERS...", "orange")
-        top_candidates = self._filter_ai_compatible(top_candidates, servers)
-        if not top_candidates:
-            self.set_status("NO AI-COMPATIBLE WARP EXIT", "red")
-            self.log("[AI] No candidate opened real Gemini and NotebookLM pages through WARP")
+        winner = None
+        if not stage1_pass:
+            self.log(f"[AI] Ни один сервер не подтвердил доступ к Flow ({route})")
+        elif omni_available():
+            # Вторая ступень: живой ответ модели Antigravity через OmniRoute.
+            # Синхронно по одному: проверка временно переключает egress OmniRoute
+            # на тестовый канал кандидата (см. _ai_e2e_works).
+            self.log(f"[AI] E2E-проверка через OmniRoute: кандидатов {len(stage1_pass)}")
+            for index, server in stage1_pass:
+                name = server.get("remark") or "сервер"
+                ok, reason, latency = self._ai_e2e_works(server)
+                if ok:
+                    self.log(f"[AI] {name}: E2E ok ({reason})")
+                    winner = (index, server)
+                    break
+                self.log(f"[AI] {name}: E2E не прошёл ({reason})")
+            if winner is None:
+                self.log("[AI] Ни один кандидат не дал живой ответ модели Antigravity")
+        else:
+            winner = stage1_pass[0]
+            self.log("[AI] OmniRoute недоступен — работает только Flow-проверка")
+
+        if winner is None:
             self.is_running = False
+            self.set_status("НЕТ РАБОЧЕГО СЕРВЕРА ДЛЯ ИИ", "red")
             self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
             return
-
-        best_idx = None
-        best_server = None
-        best_score = -999999.0
-
-        for idx, sites_count, ping_sec in top_candidates:
-            srv = servers[idx]
-            key = builder.server_key(srv)
-            speed_bps = 0.0
-            try:
-                builder.generate_final_config(srv, use_zapret=False, block_quic=True)
-                proc = self._spawn_xray(is_test=True)
-                time.sleep(0.3)
-                speed_bps, sp_str = builder.measure_server_speed(builder.SOCKS_PORT)
-                self._reap_xray(proc)
-            except Exception:
-                pass
-
-            speed_mbps = speed_bps / (1024 * 1024)
-            ping_ms = ping_sec * 1000
-            score = (sites_count * 100) + (speed_mbps * 50) - (ping_ms * 0.5)
-
-            self.log(f"[AI] Server #{idx}: sites={sites_count}, ping={int(ping_ms)}ms, speed={builder.fmt_speed(speed_bps)} -> Score={score:.1f}")
-            if score > best_score:
-                best_score = score
-                best_idx = idx
-                best_server = srv
-
-        if best_server is None:
-            best_idx = top_candidates[0][0]
-            best_server = servers[best_idx]
-
-        self.log(f"[AI] Selected server: #{best_idx} with composite score {best_score:.1f}")
-        self._start_best_server(best_server, best_idx, 0)
+        index, server = winner
+        self.ai_last_servers[str(self.warp_enabled)] = builder.server_key(server)
+        self.log(f"[AI] Сервер подтверждён: #{index} ({route})")
+        self._start_best_server(server, index, 0)
 
     def ping_test_proxy(self, port, result_list, index):
         proxies = {
@@ -1521,69 +1622,111 @@ class GibVPNApp(QMainWindow):
             result_list.append((index, reachable, avg_ping))
 
     def _ai_route_works(self, server):
-        """Check a server's normal ``server -> personal WARP`` AI path."""
-        if not builder.get_warp_settings():
-            return True
-        proc = None
-        try:
-            builder.generate_final_config(server, use_zapret=False, block_quic=True)
-            proc = self._spawn_xray(is_test=True)
-            if proc.poll() is not None or not appcore.wait_for_local_port(builder.WARP_SOCKS_PORT):
-                return False
-            session = requests.Session()
-            session.trust_env = False
-            proxies = {
-                "http": f"socks5h://127.0.0.1:{builder.WARP_SOCKS_PORT}",
-                "https": f"socks5h://127.0.0.1:{builder.WARP_SOCKS_PORT}",
-            }
-            for service, url in (
-                ("Gemini", "https://gemini.google.com/"),
-                ("NotebookLM", "https://notebooklm.google.com/"),
-            ):
-                response = session.get(
-                    url, proxies=proxies, headers={"User-Agent": "Mozilla/5.0"},
-                    timeout=(4, 12), allow_redirects=True,
-                )
-                text = (response.text or "").casefold()
-                final_url = (response.url or "").casefold()
-                blocked = (
-                    "google.com/sorry" in final_url
-                    or "location=unsupported" in final_url
-                    or "isn't currently supported in your country" in text
-                    or "not available in your country" in text
-                )
-                if response.status_code >= 400 or blocked:
-                    self.log(f"[AI] {service} rejected the current WARP exit")
-                    return False
-            return True
-        except Exception:
+        """Probe Flow through an isolated copy of the same production route."""
+        enabled = getattr(self, "warp_enabled", True)
+        if enabled and not builder.get_warp_settings():
             return False
-        finally:
-            if proc:
-                self._reap_xray(proc)
+        proc = None
+        port_base = None
+        session = None
+        name = server.get("remark") or "сервер"
+        with tempfile.TemporaryDirectory(prefix="gibvpn_flow_") as tmp:
+            try:
+                # Protect allocation across concurrent plain VPN probes. Do not
+                # alter builder globals used by the live connection or TUN.
+                with self._ai_probe_lock:
+                    port_base = appcore.find_free_local_port_block(preferred=18000)
+                    while port_base in self._ai_probe_ports:
+                        port_base = appcore.find_free_local_port_block(preferred=port_base + 100)
+                    self._ai_probe_ports.add(port_base)
+                config_path = os.path.join(tmp, "flow_probe.json")
+                builder.generate_final_config(
+                    server, use_zapret=getattr(self, "use_zapret", False),
+                    block_quic=getattr(self, "block_quic", True),
+                    warp_enabled=enabled, config_path=config_path,
+                    local_port_base=port_base,
+                )
+                proc = self._spawn_xray(is_test=True, config_path=config_path)
+                if proc.poll() is not None or not appcore.wait_for_local_port(port_base, timeout=3):
+                    self.log(f"[AI] {name}: тестовый канал не запустился")
+                    return False
+                session = requests.Session()
+                session.trust_env = False
+                proxies = {
+                    "http": f"socks5h://127.0.0.1:{port_base}",
+                    "https": f"socks5h://127.0.0.1:{port_base}",
+                }
+                response = session.get(
+                    FLOW_URL, proxies=proxies,
+                    headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "en-US,en;q=0.9"},
+                    timeout=(4, 12 if enabled else 8), allow_redirects=True,
+                )
+                usable, reason = flow_response_result(response)
+                self.log(f"[AI] {name}: {reason}")
+                return usable
+            except requests.Timeout:
+                self.log(f"[AI] {name}: Flow не ответил вовремя")
+                return False
+            except Exception as exc:
+                self.log(f"[AI] {name}: проверка Flow не удалась ({type(exc).__name__})")
+                return False
+            finally:
+                if session:
+                    session.close()
+                if proc:
+                    self._reap_xray(proc)
+                if port_base is not None:
+                    with self._ai_probe_lock:
+                        self._ai_probe_ports.discard(port_base)
 
-    def _pick_ai_compatible(self, results, servers):
-        """Return the best candidate whose generic WARP route serves Google AI."""
-        for result in sorted(results, key=lambda item: (-item[1], item[2])):
-            index = result[0]
-            server = servers[index]
-            if self._ai_route_works(server):
-                self.log(f"[AI] Google AI-compatible server: #{index}")
-                return result
-            self.log(f"[AI] Server #{index} is reachable, but its WARP exit is unsuitable for Google AI")
-        return None
+    def _ai_e2e_works(self, server):
+        """Вторая ступень ИИ-режима: живой ответ модели Antigravity через OmniRoute.
 
-    def _filter_ai_compatible(self, results, servers):
-        """Keep candidates whose real two-hop WARP path serves Google AI."""
-        compatible = []
-        for result in sorted(results, key=lambda item: (-item[1], item[2])):
-            index = result[0]
-            if self._ai_route_works(servers[index]):
-                self.log(f"[AI] Server #{index}: Gemini/NotebookLM WARP path is usable")
-                compatible.append(result)
-            else:
-                self.log(f"[AI] Server #{index}: WARP path rejected by Google AI")
-        return compatible
+        Временно направляет egress OmniRoute (провайдер antigravity) на
+        изолированный тестовый канал кандидата, сбрасывает кулдаун OmniRoute
+        и требует repeat успешных ответов модели подряд. Всегда возвращает
+        egress OmniRoute к исходному значению — до сноса тестового xray."""
+        enabled = getattr(self, "warp_enabled", True)
+        if enabled and not builder.get_warp_settings():
+            return False, "нет профиля WARP", None
+        proc = None
+        port_base = None
+        prev_proxy = None
+        with tempfile.TemporaryDirectory(prefix="gibvpn_e2e_") as tmp:
+            try:
+                with self._ai_probe_lock:
+                    port_base = appcore.find_free_local_port_block(preferred=18000)
+                    while port_base in self._ai_probe_ports:
+                        port_base = appcore.find_free_local_port_block(preferred=port_base + 100)
+                    self._ai_probe_ports.add(port_base)
+                config_path = os.path.join(tmp, "e2e_probe.json")
+                builder.generate_final_config(
+                    server, use_zapret=getattr(self, "use_zapret", False),
+                    block_quic=getattr(self, "block_quic", True),
+                    warp_enabled=enabled, config_path=config_path,
+                    local_port_base=port_base,
+                )
+                proc = self._spawn_xray(is_test=True, config_path=config_path)
+                if proc.poll() is not None or not appcore.wait_for_local_port(port_base, timeout=3):
+                    return False, "тестовый канал не запустился", None
+                prev_proxy = omni_set_provider_proxy("127.0.0.1", port_base, "socks5")
+                omni_reset_cooldown()
+                ok, reason, latency = omni_e2e_check(repeat=2)
+                return ok, reason, latency
+            except Exception as exc:
+                return False, f"ошибка E2E ({type(exc).__name__})", None
+            finally:
+                # Сначала вернуть egress OmniRoute, потом убивать тестовый xray.
+                if prev_proxy is not None:
+                    try:
+                        omni_restore_proxy(prev_proxy)
+                    except Exception:
+                        pass
+                if proc:
+                    self._reap_xray(proc)
+                if port_base is not None:
+                    with self._ai_probe_lock:
+                        self._ai_probe_ports.discard(port_base)
 
     def _run_fast_tcp_ping(self, servers_with_index, timeout=1.5):
         """Fast parallel TCP connect probe to check reachability and raw RTT in <1s."""
@@ -1763,7 +1906,7 @@ class GibVPNApp(QMainWindow):
         finally:
             self._reconnect_in_progress = False
 
-    def _start_best_server(self, best_server, best_index, ping_ms, start_watcher=True):
+    def _start_best_server(self, best_server, best_index, ping_ms, start_watcher=True, verify_before_tun=False):
         if self.use_tun and not appcore.is_windows_admin():
             self.is_running = False
             self.set_status("TUN REQUIRES ADMIN", "red")
@@ -1798,15 +1941,23 @@ class GibVPNApp(QMainWindow):
             "http": appcore.LOCAL_HTTP_PROXY_URL,
             "https": appcore.LOCAL_HTTP_PROXY_URL,
         }
-        tun_server_address = (
-            builder.resolved_server_address(best_server)
-            if self.connection_mode == "tun" else ""
-        )
+        connection_server = builder._pin_server_endpoint(best_server) if self.use_tun else best_server
+        tun_server_address = ""
+        if self.use_tun:
+            try:
+                address = ipaddress.ip_address(builder.server_address(connection_server).strip('[]'))
+            except ValueError:
+                raise RuntimeError("Не удалось определить адрес VPN-сервера. Проверьте сеть Windows и повторите подключение; маршруты не изменялись.")
+            if address.version == 4:
+                tun_server_address = str(address)
+        finals_split = getattr(self, "finals_split_enabled", False) is True and self.use_tun
         builder.generate_final_config(
-            best_server,
+            connection_server,
             use_zapret=use_zap,
             block_quic=getattr(self, "block_quic", True),
-            resolve_endpoints=self.use_tun,
+            resolve_endpoints=False,
+            warp_enabled=self.warp_enabled,
+            finals_split_enabled=finals_split,
         )
 
         vpn_host = builder.server_address(best_server)
@@ -1831,6 +1982,8 @@ class GibVPNApp(QMainWindow):
             raise RuntimeError(
                 f"Xray не открыл собственный локальный порт {builder.SOCKS_PORT}"
             )
+        if verify_before_tun and not self._base_proxy_ready():
+            raise RuntimeError("Последний VPN-сервер не отвечает; маршруты Windows не изменялись")
         if self.connection_mode == "tun":
             # Defensive cleanup for settings created by builds where proxy and
             # TUN could accidentally be active at the same time.
@@ -1842,8 +1995,10 @@ class GibVPNApp(QMainWindow):
                 self.log("[SYSTEM] Перед запуском TUN убран отдельный прокси Antigravity")
             try:
                 exclusions = [tun_server_address] if tun_server_address else []
-                self.tun_process = self._spawn_tun(exclusions)
+                self.tun_process = self._spawn_tun(exclusions, finals_split_enabled=finals_split)
                 self.log("[TUN] Полный VPN включён: весь TCP/UDP и DNS идут через VPN")
+                if finals_split:
+                    self.log("[THE FINALS] Вход через VPN, игровой обмен напрямую")
                 forced = builder.read_process_route_matchers("vpn_apps.txt")
                 bypass = builder.read_process_route_matchers("direct_apps.txt")
                 forced_count = sum(len(items) for items in forced.values())
@@ -1873,6 +2028,8 @@ class GibVPNApp(QMainWindow):
             except OSError as exc:
                 self.log(f"[SYSTEM] Не удалось включить прокси Windows: {exc}")
         self.is_running = True
+        self._active_server = best_server
+        self._active_server_index = best_index
         if self.tun_process:
             threading.Thread(
                 target=self._watch_tun_process,
@@ -1882,16 +2039,21 @@ class GibVPNApp(QMainWindow):
         self.log(f"[CORE] Final xray PID: {self.xray_process.pid}")
         self.log(f"[CORE] SOCKS inbound: 127.0.0.1:{builder.SOCKS_PORT}")
         self.log(f"[CORE] HTTP inbound: 127.0.0.1:{builder.HTTP_PORT}")
-        if builder.get_warp_settings():
+        if self.warp_enabled and builder.get_warp_settings():
             self.log("[ROUTING] ChatGPT/OpenAI -> personal WARP -> selected VPN server")
             self.log("[ROUTING] Antigravity (all processes) -> personal WARP -> selected VPN server")
         else:
-            self.log("[ROUTING] ChatGPT/OpenAI -> selected VPN server (WARP profile not imported)")
+            self.log("[ROUTING] ИИ и Antigravity -> выбранный VPN-сервер (WARP выключен или профиль отсутствует)")
         self._conn_name = (best_server.get("remark") or "").strip() or f"Server {best_index}"
         self._conn_ping_ms = ping_ms
         self._connected_at = time.time()
         self.set_status(self._running_status_text(), "green")
         self.log(f"VPN Started Successfully on Server {best_index}.")
+        self.last_connection = {
+            "server_key": builder.server_key(best_server),
+            "mode": self.current_mode, "connection_mode": self.connection_mode,
+        }
+        self.save_settings()
         self.set_toggle("СТОП", "#1F4E79", "#2A6299", True)
 
         self._traffic_up = self._traffic_down = 0
@@ -1904,6 +2066,20 @@ class GibVPNApp(QMainWindow):
                 self.log("[CORE] Auto-reconnect watcher started")
                 self._watcher_thread = threading.Thread(target=self.auto_reconnect_worker, daemon=True)
                 self._watcher_thread.start()
+
+    def _base_proxy_ready(self):
+        # Used only for a cached automatic start, before installing TUN routes.
+        # A manual server selection still connects without availability tests.
+        with requests.Session() as session:
+            session.trust_env = False
+            for url in ("https://cp.cloudflare.com/generate_204", "https://connectivitycheck.gstatic.com/generate_204"):
+                try:
+                    with session.get(url, proxies=self.proxy_dict, timeout=(2.0, 3.0)) as response:
+                        if response.status_code == 204:
+                            return True
+                except requests.RequestException:
+                    pass
+        return False
 
     @staticmethod
     def _fmt_bytes(n):
@@ -2159,6 +2335,10 @@ class GibVPNApp(QMainWindow):
         bottom_left = margin
         bottom_w = logs_left - bottom_left - gap
         self.bottom_panel.setGeometry(bottom_left, h - margin - bottom_panel_h, max(200, bottom_w), bottom_panel_h)
+        # All controls must fit even at the minimum window width.
+        mode_size = min(72, max(48, (bottom_w - 185 - 36) // 4))
+        for button in (self.btn_min, self.btn_max, self.btn_speed, self.btn_auto):
+            button.setFixedSize(mode_size, mode_size)
 
         toggle_x = (margin + link_w + logs_left - toggle_w) // 2
         self.btn_toggle.setGeometry(toggle_x, margin + 4, toggle_w, toggle_h)
@@ -2606,6 +2786,18 @@ class GibVPNApp(QMainWindow):
                     data = json.load(f)
 
                 self.current_mode = data.get("current_mode", "min")
+                self.warp_enabled = bool(data.get("warp_enabled", True))
+                self.finals_split_enabled = bool(data.get("finals_split_enabled", False))
+                self.manual_server = data.get("manual_server")
+                self.last_connection = data.get("last_connection", {})
+                if not isinstance(self.last_connection, dict):
+                    self.last_connection = {}
+                if not isinstance(self.manual_server, dict) or "protocol" not in self.manual_server:
+                    self.manual_server = None
+                self.ai_last_servers = data.get("ai_last_servers", {})
+                if not isinstance(self.ai_last_servers, dict):
+                    self.ai_last_servers = {}
+                self._update_warp_button()
                 self.sub_auto_update_hours = data.get("sub_auto_update_hours", 24)
                 self.block_quic = data.get("block_quic", True)
                 stored_connection_mode = data.get("connection_mode")
@@ -2699,6 +2891,11 @@ class GibVPNApp(QMainWindow):
 
         data = {
             "current_mode": self.current_mode,
+            "warp_enabled": self.warp_enabled,
+            "finals_split_enabled": self.finals_split_enabled,
+            "manual_server": self.manual_server,
+            "last_connection": self.last_connection,
+            "ai_last_servers": self.ai_last_servers,
             "autostart_enabled": self.autostart_enabled,
             "sub_auto_update_hours": self.sub_auto_update_hours,
             "block_quic": self.block_quic,
@@ -2767,6 +2964,9 @@ class GibVPNApp(QMainWindow):
             "exported_at": time.time(),
             "settings": {
                 "current_mode": self.current_mode,
+                "warp_enabled": self.warp_enabled,
+                "finals_split_enabled": self.finals_split_enabled,
+                "manual_server": self.manual_server,
                 "autostart_enabled": self.autostart_enabled,
                 "sub_auto_update_hours": self.sub_auto_update_hours,
                 "block_quic": self.block_quic,
@@ -2808,6 +3008,11 @@ class GibVPNApp(QMainWindow):
         st = data.get("settings", {})
         if isinstance(st, dict):
             self.current_mode = st.get("current_mode", self.current_mode)
+            self.warp_enabled = bool(st.get("warp_enabled", self.warp_enabled))
+            self.finals_split_enabled = bool(st.get("finals_split_enabled", self.finals_split_enabled))
+            manual = st.get("manual_server")
+            self.manual_server = manual if isinstance(manual, dict) and "protocol" in manual else None
+            self._update_warp_button()
             self.autostart_enabled = st.get("autostart_enabled", self.autostart_enabled)
             self.sub_auto_update_hours = st.get("sub_auto_update_hours", self.sub_auto_update_hours)
             self.block_quic = st.get("block_quic", self.block_quic)
@@ -2900,7 +3105,7 @@ if __name__ == "__main__":
         instance_lock = QLockFile(os.path.join(APP_DIR, "gibvpn.lock"))
         # An elevated replacement can start a fraction earlier than the old
         # process releases its lock.  Give that intentional hand-off time.
-        if not instance_lock.tryLock(10000):
+        if not instance_lock.tryLock(3000 if "--start-vpn" in sys.argv else 0):
             QMessageBox.warning(
                 None, "GibVPN",
                 "Приложение GibVPN уже запущено!"
@@ -2909,6 +3114,13 @@ if __name__ == "__main__":
 
         win = GibVPNApp()
         win.show()
+        try:
+            from agent_api import AgentAPI
+            win.agent_api = AgentAPI(win)
+            win.agent_api.start()
+            print("[AgentAPI] control-API: http://127.0.0.1:7781")
+        except Exception as e:
+            log_exception("AgentAPI failed to start")
         if "--start-vpn" in sys.argv:
             # Used by the proxy -> TUN hand-off: the elevated replacement
             # resumes the connection after the old process released its lock.

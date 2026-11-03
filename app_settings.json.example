@@ -9,6 +9,9 @@
   "bottom_offset_x": 0,
   "bottom_offset_y": 0,
   "current_mode": "min",
+  "warp_enabled": true,
+  "finals_split_enabled": false,
+  "manual_server": null,
   "check_sites": {
     "Google": "http://www.google.com/generate_204",
     "Cloudflare": "http://cp.cloudflare.com/generate_204",
