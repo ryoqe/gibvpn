@@ -119,7 +119,8 @@ class StartupAndSelectionChecks(unittest.TestCase):
              mock.patch.object(builder, 'configure_local_ports'), \
              mock.patch.object(appcore, 'configure_local_proxy_ports'), \
              mock.patch.object(builder, '_pin_server_endpoint', return_value=SERVER), \
-             mock.patch.object(builder, 'generate_final_config') as generate:
+             mock.patch.object(builder, 'generate_final_config') as generate, \
+             mock.patch('socket.getaddrinfo', side_effect=OSError('no dns')):
             with self.assertRaisesRegex(RuntimeError, 'определить адрес'):
                 GibVPNApp._start_best_server(app, SERVER, 0, 0)
         generate.assert_not_called()
@@ -346,10 +347,44 @@ class RoutingChecks(unittest.TestCase):
         app._collect_servers_for_start.return_value = (servers, None)
         app._filter_servers.return_value = (servers[:2], servers[2:], [])
         app._ai_route_works.side_effect = lambda srv: srv is servers[7]
-        with mock.patch('gui.os.path.exists', return_value=True):
+        app._ai_e2e_works.side_effect = lambda srv: (True, 'E2E ok (mock)', 100)
+        with mock.patch('gui.os.path.exists', return_value=True), \
+             mock.patch('gui.omni_available', return_value=True):
             GibVPNApp._smart_start_auto_inner(app)
         app._start_best_server.assert_called_once_with(servers[7], 7, 0)
+        app._ai_e2e_works.assert_called_once_with(servers[7])
         self.assertEqual(app._ai_route_works.call_count, 8)
+
+    def test_e2e_rejects_flow_passing_server(self):
+        """Сервер, прошедший Flow, но не давший живой ответ модели, не подключается."""
+        servers = [dict(SERVER, remark=f'Server {i}', tag=f'srv{i}') for i in range(4)]
+        app = mock.Mock()
+        app.warp_enabled = False
+        app.ai_last_servers = {}
+        app._collect_servers_for_start.return_value = (servers, None)
+        app._filter_servers.return_value = ([], servers, [])
+        app._ai_route_works.side_effect = lambda srv: True
+        app._ai_e2e_works.side_effect = lambda srv: (False, 'регион не поддерживается', None)
+        with mock.patch('gui.os.path.exists', return_value=True), \
+             mock.patch('gui.omni_available', return_value=True):
+            GibVPNApp._smart_start_auto_inner(app)
+        app._start_best_server.assert_not_called()
+        self.assertEqual(app._ai_e2e_works.call_count, 4)
+
+    def test_omni_unavailable_falls_back_to_flow_only(self):
+        """Без OmniRoute ИИ-режим работает по-старому: Flow-победитель подключается."""
+        servers = [dict(SERVER, remark=f'Server {i}', tag=f'srv{i}') for i in range(4)]
+        app = mock.Mock()
+        app.warp_enabled = False
+        app.ai_last_servers = {}
+        app._collect_servers_for_start.return_value = (servers, None)
+        app._filter_servers.return_value = ([], servers, [])
+        app._ai_route_works.side_effect = lambda srv: srv is servers[1]
+        with mock.patch('gui.os.path.exists', return_value=True), \
+             mock.patch('gui.omni_available', return_value=False):
+            GibVPNApp._smart_start_auto_inner(app)
+        app._start_best_server.assert_called_once_with(servers[1], 1, 0)
+        app._ai_e2e_works.assert_not_called()
 
     def test_missing_profile_fails_instead_of_claiming_success(self):
         app = mock.Mock(warp_enabled=True)
@@ -366,9 +401,11 @@ class RoutingChecks(unittest.TestCase):
         app._collect_servers_for_start.return_value = (servers, None)
         app._filter_servers.return_value = ([], servers, [])
         app._ai_route_works.side_effect = lambda srv: srv is servers[2]
+        app._ai_e2e_works.side_effect = lambda srv: (True, 'E2E ok (mock)', 100)
         with mock.patch('gui.os.path.exists', return_value=True), \
              mock.patch.object(builder, 'get_warp_settings', return_value={'profile': 'test'}), \
-             mock.patch('gui.ThreadPoolExecutor', wraps=ThreadPoolExecutor) as pool:
+             mock.patch('gui.ThreadPoolExecutor', wraps=ThreadPoolExecutor) as pool, \
+             mock.patch('gui.omni_available', return_value=True):
             GibVPNApp._smart_start_auto_inner(app)
         pool.assert_called_once_with(max_workers=1)
         app._start_best_server.assert_called_once_with(servers[2], 2, 0)

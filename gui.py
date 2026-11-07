@@ -1131,6 +1131,12 @@ class GibVPNApp(QMainWindow):
         # adapter from a crashed/forced-stopped sing-box process, in which case
         # the next start fails before any server or mode is involved.
         interface_name = f"gibvpn-{uuid.uuid4().hex[:8]}"
+        # ...а случайного имени мало: мёртвый адаптер прошлого запуска держит
+        # IPv4-адрес туннеля, и новый sing-box умирает с «The object already
+        # exists», оставляя полумёртвый туннель и висящие маршруты/DNS. Чистим.
+        removed = appcore.remove_stale_gibvpn_adapters()
+        if removed:
+            self.log(f"[TUN] Удалены остатки прошлых запусков: {', '.join(removed)}")
         config_path = builder.generate_tun_config(
             route_exclude_addresses, interface_name=interface_name,
             finals_split_enabled=finals_split_enabled,
@@ -1945,8 +1951,16 @@ class GibVPNApp(QMainWindow):
         tun_server_address = ""
         if self.use_tun:
             try:
-                address = ipaddress.ip_address(builder.server_address(connection_server).strip('[]'))
-            except ValueError:
+                raw_address = builder.server_address(connection_server).strip('[]')
+                try:
+                    address = ipaddress.ip_address(raw_address)
+                except ValueError:
+                    # Доменный адрес сервера — резолвим системным DNS (TUN-маршрутам
+                    # нужен IP); без этого запуск на таких серверах падал целиком.
+                    import socket as _socket
+                    infos = _socket.getaddrinfo(raw_address, None, _socket.AF_INET, _socket.SOCK_STREAM)
+                    address = ipaddress.ip_address(infos[0][4][0])
+            except (ValueError, OSError):
                 raise RuntimeError("Не удалось определить адрес VPN-сервера. Проверьте сеть Windows и повторите подключение; маршруты не изменялись.")
             if address.version == 4:
                 tun_server_address = str(address)

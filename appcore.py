@@ -5,6 +5,7 @@ This module intentionally has no Qt imports so it can be used from anywhere
 (gui, tests, tools) without pulling in PyQt6.
 """
 import os
+import subprocess
 import sys
 import shutil
 import time
@@ -386,6 +387,74 @@ $routeIndexes = @(Get-NetRoute -ErrorAction SilentlyContinue |
     except (OSError, ValueError, subprocess.SubprocessError):
         # Detection is a safety aid. A locked-down PowerShell policy must not
         # make the ordinary proxy mode unusable.
+        return []
+
+
+def remove_stale_gibvpn_adapters():
+    """Удалить wintun-адаптеры прошлых запусков (gibvpn-*), оставшиеся от
+    жёстко умерших sing-box процессов.
+
+    Мёртвый адаптер держит IPv4-адрес туннеля; новый sing-box тогда падает с
+    «set ipv4 address: The object already exists» прямо на старте, туннель
+    остаётся полумёртвым, а DNS/маршруты от прошлого запуска — висящими. Это
+    роняло всю сеть Windows, пока адаптеры не вырубали руками. Вызывается
+    перед каждым спавном TUN; права администратора там уже есть.
+    """
+    script = r"""
+@(Get-NetAdapter -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like 'gibvpn-*' } |
+    ForEach-Object {
+        [PSCustomObject]@{
+            Name = $_.Name
+            PnPDeviceID = $_.PnPDeviceID
+        }
+    }) | ConvertTo-Json -Compress
+"""
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-NonInteractive",
+                "-ExecutionPolicy", "Bypass", "-Command", script,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return []
+        data = json.loads(result.stdout)
+        if isinstance(data, dict):
+            data = [data]
+        elif not isinstance(data, list):
+            data = []
+        removed = []
+        for item in data or []:
+            name = item.get("Name") if isinstance(item, dict) else str(item)
+            pnp_id = item.get("PnPDeviceID") if isinstance(item, dict) else None
+            if pnp_id:
+                subprocess.run(
+                    ["pnputil", "/remove-device", pnp_id],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            if name:
+                subprocess.run(
+                    [
+                        "powershell.exe", "-NoProfile", "-NonInteractive",
+                        "-Command",
+                        f"Disable-NetAdapter -Name '{name}' -Confirm:$false -ErrorAction SilentlyContinue",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                removed.append(name)
+        return removed
+    except (OSError, ValueError, subprocess.SubprocessError):
         return []
 
 
