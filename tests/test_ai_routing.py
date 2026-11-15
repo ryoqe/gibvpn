@@ -355,8 +355,8 @@ class RoutingChecks(unittest.TestCase):
         app._ai_e2e_works.assert_called_once_with(servers[7])
         self.assertEqual(app._ai_route_works.call_count, 8)
 
-    def test_e2e_rejects_flow_passing_server(self):
-        """Сервер, прошедший Flow, но не давший живой ответ модели, не подключается."""
+    def test_e2e_failure_falls_back_to_flow_candidate(self):
+        """OmniRoute может быть нездоров: Flow-кандидат всё равно подключается."""
         servers = [dict(SERVER, remark=f'Server {i}', tag=f'srv{i}') for i in range(4)]
         app = mock.Mock()
         app.warp_enabled = False
@@ -368,7 +368,7 @@ class RoutingChecks(unittest.TestCase):
         with mock.patch('gui.os.path.exists', return_value=True), \
              mock.patch('gui.omni_available', return_value=True):
             GibVPNApp._smart_start_auto_inner(app)
-        app._start_best_server.assert_not_called()
+        app._start_best_server.assert_called_once_with(servers[0], 0, 0)
         self.assertEqual(app._ai_e2e_works.call_count, 4)
 
     def test_omni_unavailable_falls_back_to_flow_only(self):
@@ -427,6 +427,31 @@ class RoutingChecks(unittest.TestCase):
         app._reap_xray.assert_called_once_with(proc)
         session.return_value.close.assert_called_once()
         self.assertEqual(app._ai_probe_ports, set())
+
+
+class HotkeyGuard(unittest.TestCase):
+    class FakeText:
+        pass
+
+    def test_space_shortcut_follows_focus(self):
+        app = mock.Mock()
+        app._space_shortcut = mock.Mock()
+        fake = self.FakeText()
+        with mock.patch('gui.QLineEdit', self.FakeText), \
+             mock.patch('gui.QPlainTextEdit', self.FakeText):
+            GibVPNApp._update_space_shortcut(app, None, fake)
+            app._space_shortcut.setEnabled.assert_called_with(False)
+            GibVPNApp._update_space_shortcut(app, None, object())
+            app._space_shortcut.setEnabled.assert_called_with(True)
+
+    def test_toggle_does_not_fire_while_typing(self):
+        app = mock.Mock(is_running=False)
+        fake = self.FakeText()
+        with mock.patch('gui.QApplication.focusWidget', return_value=fake), \
+             mock.patch('gui.QLineEdit', self.FakeText), \
+             mock.patch('gui.QPlainTextEdit', self.FakeText):
+            GibVPNApp.toggle_vpn(app)
+        app._start_current_mode.assert_not_called()
 
 
 if __name__ == '__main__':

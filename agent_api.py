@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Локальный control-API GibVPN для ИИ-агента (мост gibvpn-mcp).
+r"""Локальный control-API GibVPN для ИИ-агента (мост gibvpn-mcp).
 
 Слушает ТОЛЬКО 127.0.0.1:7781. Эндпоинты:
   GET  /status                 — состояние окна/VPN (чтение атрибутов, без Qt-вызовов)
@@ -11,8 +11,16 @@
 
 Ответ всегда application/json. HTTP-поток никогда не трогает Qt напрямую:
 действия исполняются в GUI-потоке через BlockingQueuedConnection.
+
+Защита: запрос принимается только с Host 127.0.0.1/localhost и без заголовка
+Origin (браузерная страница всегда его присылает, поэтому CSRF невозможен).
+Необязательный токен X-GibVPN-Token хранится в %APPDATA%\GibVPN\agent_api.json;
+обязательным он становится при GIBVPN_AGENT_REQUIRE_TOKEN=1.
 """
+import hmac
 import json
+import os
+import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -21,6 +29,51 @@ from PyQt6.QtCore import (QObject, pyqtSlot as Slot, QMetaObject, Q_ARG,
 
 API_PORT = 7781
 API_HOST = "127.0.0.1"
+TOKEN_HEADER = "X-GibVPN-Token"
+REQUIRE_TOKEN_ENV = "GIBVPN_AGENT_REQUIRE_TOKEN"
+ALLOWED_HOSTS = {
+    API_HOST, "localhost",
+    f"{API_HOST}:{API_PORT}", f"localhost:{API_PORT}",
+}
+
+
+def is_authorized(headers, token, require_token=False):
+    """Return (allowed, reason) for a local HTTP request.
+
+    Browsers cannot forge Host or omit Origin on cross-origin POST, so these
+    two checks stop web-page CSRF and DNS-rebinding attempts. The token is an
+    extra layer for clients that can send a custom header.
+    """
+    host = str(headers.get("Host") or "").strip().lower()
+    if host not in ALLOWED_HOSTS:
+        return False, "forbidden host"
+    if headers.get("Origin"):
+        return False, "origin header is not allowed"
+    sent = str(headers.get(TOKEN_HEADER) or "")
+    if require_token:
+        if not sent or not token or not hmac.compare_digest(sent, token):
+            return False, "invalid token"
+    elif sent and (not token or not hmac.compare_digest(sent, token)):
+        return False, "invalid token"
+    return True, ""
+
+
+def write_api_state(token):
+    """Publish port/token for the local MCP bridge; never log the token."""
+    try:
+        from appcore import APP_DIR
+    except Exception:
+        return None
+    path = os.path.join(APP_DIR, "agent_api.json")
+    temp_path = path + ".tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            json.dump({"host": API_HOST, "port": API_PORT,
+                       "token_header": TOKEN_HEADER, "token": token}, handle)
+        os.replace(temp_path, path)
+        return path
+    except OSError:
+        return None
 
 
 class _Adapter(QObject):
@@ -98,9 +151,16 @@ class AgentAPI(threading.Thread):
         super().__init__(daemon=True, name="AgentAPI")
         self.adapter = _Adapter(window)
         self._srv = None
+        self.token = secrets.token_hex(16)
+        self.require_token = str(
+            os.environ.get(REQUIRE_TOKEN_ENV) or ""
+        ).strip().lower() in ("1", "true", "yes", "on")
 
     def run(self):
         adapter = self.adapter
+        token = self.token
+        require_token = self.require_token
+        write_api_state(token)
 
         class Handler(BaseHTTPRequestHandler):
             def _send(self, code, payload):
@@ -108,8 +168,17 @@ class AgentAPI(threading.Thread):
                 self.send_response(code)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(body)
+
+            def _authorized(self):
+                allowed, reason = is_authorized(
+                    self.headers, token, require_token=require_token
+                )
+                if not allowed:
+                    self._send(403, {"error": reason})
+                return allowed
 
             def _read_body(self):
                 try:
@@ -124,6 +193,8 @@ class AgentAPI(threading.Thread):
                     return {}
 
             def do_GET(self):
+                if not self._authorized():
+                    return
                 path = self.path.split("?", 1)[0]
                 w = adapter.window
                 try:
@@ -153,6 +224,8 @@ class AgentAPI(threading.Thread):
                     self._send(500, {"error": str(e)[:200]})
 
             def do_POST(self):
+                if not self._authorized():
+                    return
                 path = self.path.split("?", 1)[0]
                 try:
                     body = self._read_body()
@@ -196,7 +269,13 @@ class AgentAPI(threading.Thread):
             self._srv = ThreadingHTTPServer((API_HOST, API_PORT), Handler)
             self._srv.serve_forever(poll_interval=0.5)
         except Exception as e:
-            print(f"[AgentAPI] не запустился: {e}")
+            try:
+                from appcore import write_session_log
+                write_session_log(
+                    f"[AgentAPI] не запустился на {API_HOST}:{API_PORT}: {e}"
+                )
+            except Exception:
+                pass
 
     def stop(self):
         if self._srv:

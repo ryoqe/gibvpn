@@ -31,7 +31,8 @@ sys.path.insert(0, str(ROOT))
 import winreg
 with mock.patch.object(winreg, 'SetValueEx'), mock.patch.object(winreg, 'DeleteValue'):
     suite = unittest.TestSuite()
-    for pattern in ('test_no_xray.py', 'test_ai_routing.py'):
+    for pattern in ('test_no_xray.py', 'test_ai_routing.py',
+                    'test_agent_api.py', 'test_subscription_parser.py'):
         suite.addTests(unittest.defaultTestLoader.discover(str(ROOT / 'tests'), pattern=pattern))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
 sys.stdout.flush()

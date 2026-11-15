@@ -8,16 +8,14 @@ __pycache__/
 
 # PyInstaller & Build automation (local dev only)
 build/
+build_*/
 dist/
+dist_*/
+*.log
 screenshot_tool.py
 *.zip
 
-# Internal dev tests & scratch files
-tests/
-!tests/
-tests/*
-!tests/test_ai_routing.py
-!tests/run_isolated.py
+# Local scratch files
 scratch/
 
 # Bundled binaries & large assets (downloaded on build/first run)
@@ -30,6 +28,7 @@ assets/
 screenshots/
 gui_preview.png
 settings_preview.png
+*_preview.png
 ofont.ru_Zeequada.ttf
 
 # User local settings, subscriptions, and private keys (DO NOT COMMIT)

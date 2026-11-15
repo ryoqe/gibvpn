@@ -1,0 +1,16 @@
+{
+  "inbounds": [
+    {
+      "tag": "tun-in",
+      "port": 10815,
+      "protocol": "tun",
+      "settings": {
+        "autoRoute": true,
+        "strictRoute": true,
+        "stack": "system",
+        "mtu": 9000
+      }
+    }
+  ],
+  "outbounds": [{"protocol": "freedom"}]
+}

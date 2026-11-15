@@ -357,7 +357,7 @@ $routeIndexes = @(Get-NetRoute -ErrorAction SilentlyContinue |
     Where-Object {
         $_.Status -eq 'Up' -and
         $routeIndexes -contains $_.InterfaceIndex -and
-        $_.Name -ne 'gibvpn-tun' -and
+        $_.Name -notlike 'gibvpn-*' -and
         (($_.Name + ' ' + $_.InterfaceDescription) -match '(?i)(tun|tap|wintun|wireguard|warp|happ|tailscale|openvpn)')
     } |
     Select-Object Name, InterfaceDescription) | ConvertTo-Json -Compress
@@ -495,41 +495,6 @@ def find_free_local_port_block(preferred=None):
             for sock in sockets:
                 sock.close()
     raise RuntimeError("Не найден свободный набор локальных портов для Xray")
-
-
-def verify_tun_connectivity(timeout=8):
-    """Probe the new system route from a child process captured by the TUN."""
-    import subprocess
-
-    curl = shutil.which("curl.exe") or shutil.which("curl")
-    if not curl:
-        return True, "curl недоступен, проверка пропущена"
-
-    targets = (
-        "https://cp.cloudflare.com/generate_204",
-        "https://www.google.com/generate_204",
-    )
-    errors = []
-    for url in targets:
-        try:
-            result = subprocess.run(
-                [
-                    curl, "--noproxy", "*", "--silent", "--show-error",
-                    "--output", os.devnull, "--write-out", "%{http_code}",
-                    "--connect-timeout", "7", "--max-time", str(timeout), url,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=timeout + 2,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            code = result.stdout.strip()
-            if result.returncode == 0 and code in {"200", "204"}:
-                return True, f"{url}: HTTP {code}"
-            errors.append((result.stderr or f"HTTP {code}").strip())
-        except (OSError, subprocess.SubprocessError) as exc:
-            errors.append(str(exc))
-    return False, "; ".join(error for error in errors if error) or "нет ответа"
 
 
 _KILL_JOB_HANDLE = None
@@ -1551,7 +1516,7 @@ def emergency_fix_internet():
     4. Flushes Windows DNS Resolver cache.
     Returns (success: bool, log_lines: list[str]).
     """
-    import subprocess, winreg
+    import subprocess
     log_lines = []
 
     if recover_user_environment_proxy():
@@ -1569,22 +1534,15 @@ def emergency_fix_internet():
         except Exception:
             pass
 
-    # Clear System Proxy in Registry
+    # Restore the snapshot taken before GibVPN enabled its proxy. Deleting the
+    # values outright would destroy a user's pre-existing corporate proxy.
     try:
-        key_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_ALL_ACCESS) as key:
-            winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
-            try:
-                winreg.DeleteValue(key, "ProxyServer")
-            except FileNotFoundError:
-                pass
-            try:
-                winreg.DeleteValue(key, "ProxyOverride")
-            except FileNotFoundError:
-                pass
-        log_lines.append("Системный прокси Windows отключён (Registry cleared)")
+        if recover_windows_system_proxy():
+            log_lines.append("Восстановлены прежние настройки системного прокси Windows")
+        else:
+            log_lines.append("Системный прокси Windows сейчас не указывает на GibVPN")
     except Exception as e:
-        log_lines.append(f"Ошибка сброса прокси: {e}")
+        log_lines.append(f"Ошибка восстановления системного прокси: {e}")
 
     # Reset WINHTTP proxy
     try:
@@ -1604,7 +1562,7 @@ def emergency_fix_internet():
     return True, log_lines
 
 
-CURRENT_APP_VERSION = "3.0.49"
+CURRENT_APP_VERSION = "3.0.50"
 
 
 def is_newer_version(candidate, current):

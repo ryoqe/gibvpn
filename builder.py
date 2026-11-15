@@ -930,6 +930,23 @@ def generate_test_config(parsed_servers, base_port=11000, config_path=None):
     return True
 
 
+_WARP_RESERVED_WARNED = False
+
+
+def _warn_warp_reserved_fallback(path):
+    global _WARP_RESERVED_WARNED
+    if _WARP_RESERVED_WARNED:
+        return
+    _WARP_RESERVED_WARNED = True
+    try:
+        from appcore import write_session_log
+        write_session_log(
+            f"[WARP] wgcf-account.toml не найден ({path}); reserved=[0,0,0]"
+        )
+    except Exception:
+        pass
+
+
 def get_warp_reserved(account_path=None):
     """Parse `reserved` from wgcf-account.toml.
 
@@ -938,6 +955,8 @@ def get_warp_reserved(account_path=None):
     """
     path = account_path or _find_file_path('wgcf-account.toml')
     if not os.path.exists(path):
+        if account_path is None:
+            _warn_warp_reserved_fallback(path)
         return [0, 0, 0]
     try:
         for line in read_text_file(path):

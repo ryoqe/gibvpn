@@ -89,10 +89,31 @@ import urllib.error as _uerr
 import urllib.request as _ureq
 import http.cookiejar as _cjar
 
-OMNI_BASE = "http://127.0.0.1:20128"
-OMNI_MODEL = "gemini-3.8-flash-medium"
-OMNI_KEY_PATH = r"C:\Users\merka\jarvis\omni-api-key.txt"
-OMNI_AUTH_PATH = r"C:\Users\merka\jarvis\mcp-gibvpn\omni-auth.txt"
+def resolve_omni_config(environ=None):
+    """Locate the user's local OmniRoute without hardcoding a home directory.
+
+    Defaults match the legacy layout (~/jarvis/...), but every path and the
+    base URL can be overridden with GIBVPN_OMNI_* environment variables.
+    """
+    env = _os.environ if environ is None else environ
+    home = _os.path.expanduser("~")
+    base_dir = env.get("GIBVPN_OMNI_DIR") or _os.path.join(home, "jarvis")
+    return {
+        "base": (env.get("GIBVPN_OMNI_BASE") or "http://127.0.0.1:20128").rstrip("/"),
+        "model": env.get("GIBVPN_OMNI_MODEL") or "gemini-3.8-flash-medium",
+        "key_path": env.get("GIBVPN_OMNI_KEY_PATH")
+        or _os.path.join(base_dir, "omni-api-key.txt"),
+        "auth_path": env.get("GIBVPN_OMNI_AUTH_PATH")
+        or _os.path.join(base_dir, "mcp-gibvpn", "omni-auth.txt"),
+    }
+
+
+_OMNI = resolve_omni_config()
+OMNI_BASE = _OMNI["base"]
+OMNI_MODEL = _OMNI["model"]
+OMNI_KEY_PATH = _OMNI["key_path"]
+OMNI_AUTH_PATH = _OMNI["auth_path"]
+OMNI_PROXY_BACKUP = "omni_proxy_backup.json"
 OMNI_NO_PROXY = _ureq.build_opener(_ureq.ProxyHandler({}))
 _OMNI_NO_PROXY = OMNI_NO_PROXY  # алиас: функции ниже используют подчёркнутое имя
 
@@ -140,17 +161,67 @@ def _omni_opener():
 
 def omni_set_provider_proxy(host, port, ptype):
     """Направить egress провайдера antigravity на проверяемый канал.
-    Возвращает прежнее значение (для omni_restore_proxy)."""
+    Возвращает прежнее значение (для omni_restore_proxy). Перед изменением
+    прежнее значение сохраняется на диск: жёсткое завершение приложения во
+    время E2E не должно оставить OmniRoute на мёртвом порту."""
     opener = _omni_opener()
     with opener.open(OMNI_BASE + "/api/settings/proxy", timeout=10) as r:
         current = _json.loads(r.read().decode("utf-8"))
     prev = (current.get("providers") or {}).get("antigravity")
+    save_proxy_backup(prev)
     body = _json.dumps({"providers": {"antigravity": {"host": host, "port": port, "type": ptype}}}).encode("utf-8")
     req = _ureq.Request(OMNI_BASE + "/api/settings/proxy", data=body, method="PUT",
                         headers={"Content-Type": "application/json"})
     with opener.open(req, timeout=10) as r:
         r.read()
     return prev
+
+
+def _proxy_backup_path():
+    from appcore import APP_DIR
+    return _os.path.join(APP_DIR, OMNI_PROXY_BACKUP)
+
+
+def save_proxy_backup(prev):
+    """Persist the pre-test egress so the next launch can undo a crash."""
+    try:
+        path = _proxy_backup_path()
+        temp_path = path + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            _json.dump({"prev": prev}, handle)
+        _os.replace(temp_path, path)
+    except OSError:
+        pass
+
+
+def load_proxy_backup():
+    """Return (exists, prev). Corrupt files are treated as absent."""
+    try:
+        with open(_proxy_backup_path(), encoding="utf-8") as handle:
+            data = _json.load(handle)
+        return True, data.get("prev")
+    except (OSError, ValueError):
+        return False, None
+
+
+def clear_proxy_backup():
+    try:
+        _os.remove(_proxy_backup_path())
+    except OSError:
+        pass
+
+
+def recover_proxy_backup():
+    """Undo an interrupted E2E. Returns 'none', 'restored' or 'pending'."""
+    exists, prev = load_proxy_backup()
+    if not exists:
+        return "none"
+    try:
+        omni_restore_proxy(prev)
+    except Exception:
+        return "pending"
+    clear_proxy_backup()
+    return "restored"
 
 
 def omni_restore_proxy(prev):

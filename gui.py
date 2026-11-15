@@ -14,7 +14,8 @@ import ipaddress
 from concurrent.futures import ThreadPoolExecutor
 from ai_probe import (FLOW_URL, flow_response_result, omni_available,
                       omni_set_provider_proxy, omni_restore_proxy,
-                      omni_reset_cooldown, omni_e2e_check)
+                      omni_reset_cooldown, omni_e2e_check,
+                      clear_proxy_backup, recover_proxy_backup)
 
 import builder
 import appcore
@@ -191,6 +192,14 @@ class GibVPNApp(QMainWindow):
             self.log("[SYSTEM] Восстановлены прежние настройки Antigravity")
         else:
             appcore.disable_antigravity_proxy_if_ours()
+        try:
+            omni_recovery = recover_proxy_backup()
+        except Exception:
+            omni_recovery = "pending"
+        if omni_recovery == "restored":
+            self.log("[SYSTEM] Восстановлен egress OmniRoute после прошлого сбоя")
+        elif omni_recovery == "pending":
+            self.log("[SYSTEM] Egress OmniRoute восстановится при следующем запуске OmniRoute")
         self._setup_tray()
         self._setup_hotkeys()
 
@@ -918,6 +927,10 @@ class GibVPNApp(QMainWindow):
         self._worker.start()
 
     def toggle_vpn(self):
+        # Space is a window shortcut, so it must not steal typing in the
+        # log search field or any other text input.
+        if isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit)):
+            return
         if not self.is_running:
             if self.connection_mode == "tun" and not appcore.is_windows_admin():
                 self._restart_for_tun_admin(start_vpn=True)
@@ -1003,7 +1016,19 @@ class GibVPNApp(QMainWindow):
     def _setup_hotkeys(self):
         QShortcut(QKeySequence("Ctrl+R"), self, activated=self.update_active_subscription_bg)
         QShortcut(QKeySequence("Ctrl+S"), self, activated=self.open_settings)
-        QShortcut(QKeySequence(Qt.Key.Key_Space), self, activated=self.toggle_vpn)
+        self._space_shortcut = QShortcut(
+            QKeySequence(Qt.Key.Key_Space), self, activated=self.toggle_vpn
+        )
+        app = QApplication.instance()
+        if app is not None:
+            app.focusChanged.connect(self._update_space_shortcut)
+
+    def _update_space_shortcut(self, _old, new):
+        # A disabled shortcut lets Space type normally in the log search.
+        if getattr(self, "_space_shortcut", None) is not None:
+            self._space_shortcut.setEnabled(
+                not isinstance(new, (QLineEdit, QPlainTextEdit))
+            )
 
     def update_active_subscription_bg(self):
         if self.active_subscription_index == -1:
@@ -1211,12 +1236,12 @@ class GibVPNApp(QMainWindow):
                     pass
                 self._xray_processes.discard(proc)
 
-    def smart_start_vpn(self):
+    def _smart_start_guard(self, inner, label):
         try:
             self._reconnect_in_progress = True
-            self._smart_start_vpn_inner()
+            inner()
         except Exception as e:
-            log_exception("smart_start_vpn crashed")
+            log_exception(f"{label} crashed")
             self.set_status(f"Error: {e}", "red")
             self.log(f"CRITICAL ERROR: {e}")
             self.log(f"Details saved to {LOG_PATH}")
@@ -1224,6 +1249,9 @@ class GibVPNApp(QMainWindow):
             self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
         finally:
             self._reconnect_in_progress = False
+
+    def smart_start_vpn(self):
+        self._smart_start_guard(self._smart_start_vpn_inner, "smart_start_vpn")
 
     def _smart_start_vpn_inner(self):
         self.set_status("PARSING SERVERS...", "orange")
@@ -1303,18 +1331,7 @@ class GibVPNApp(QMainWindow):
 
 
     def smart_start_max_availability(self):
-        try:
-            self._reconnect_in_progress = True
-            self._smart_start_max_inner()
-        except Exception as e:
-            log_exception("smart_start_max_availability crashed")
-            self.set_status(f"Error: {e}", "red")
-            self.log(f"CRITICAL ERROR: {e}")
-            self.log(f"Details saved to {LOG_PATH}")
-            self.is_running = False
-            self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
-        finally:
-            self._reconnect_in_progress = False
+        self._smart_start_guard(self._smart_start_max_inner, "smart_start_max_availability")
 
     def _smart_start_max_inner(self):
         self.set_status("PARSING SERVERS...", "orange")
@@ -1394,17 +1411,7 @@ class GibVPNApp(QMainWindow):
 
 
     def smart_start_speed(self):
-        try:
-            self._reconnect_in_progress = True
-            self._smart_start_speed_inner()
-        except Exception as e:
-            log_exception("smart_start_speed crashed")
-            self.set_status(f"Error: {e}", "red")
-            self.log(f"CRITICAL ERROR: {e}")
-            self.is_running = False
-            self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
-        finally:
-            self._reconnect_in_progress = False
+        self._smart_start_guard(self._smart_start_speed_inner, "smart_start_speed")
 
     def _smart_start_speed_inner(self):
         self.is_running = True
@@ -1472,17 +1479,7 @@ class GibVPNApp(QMainWindow):
         self._start_best_server(best_server, best_index, 0)
 
     def smart_start_auto(self):
-        try:
-            self._reconnect_in_progress = True
-            self._smart_start_auto_inner()
-        except Exception as e:
-            log_exception("smart_start_auto crashed")
-            self.set_status(f"Error: {e}", "red")
-            self.log(f"CRITICAL ERROR: {e}")
-            self.is_running = False
-            self.set_toggle("СТАРТ", "#42A5F5", "#64B5F6", True)
-        finally:
-            self._reconnect_in_progress = False
+        self._smart_start_guard(self._smart_start_auto_inner, "smart_start_auto")
 
     def _smart_start_auto_inner(self):
         self.is_running = True
@@ -1561,7 +1558,15 @@ class GibVPNApp(QMainWindow):
                     break
                 self.log(f"[AI] {name}: E2E не прошёл ({reason})")
             if winner is None:
-                self.log("[AI] Ни один кандидат не дал живой ответ модели Antigravity")
+                # OmniRoute может быть нездоров (кулдаун провайдера, ключ) —
+                # это не доказательство плохого сервера. Подключаем лучший
+                # Flow-кандидат с явным предупреждением.
+                index, server = stage1_pass[0]
+                winner = (index, server)
+                self.log(
+                    "[AI] E2E не подтвердил модель, но Flow доступен: "
+                    f"подключаю #{index} ({server.get('remark') or 'сервер'})"
+                )
         else:
             winner = stage1_pass[0]
             self.log("[AI] OmniRoute недоступен — работает только Flow-проверка")
@@ -1698,6 +1703,7 @@ class GibVPNApp(QMainWindow):
         proc = None
         port_base = None
         prev_proxy = None
+        proxy_touched = False
         with tempfile.TemporaryDirectory(prefix="gibvpn_e2e_") as tmp:
             try:
                 with self._ai_probe_lock:
@@ -1716,6 +1722,7 @@ class GibVPNApp(QMainWindow):
                 if proc.poll() is not None or not appcore.wait_for_local_port(port_base, timeout=3):
                     return False, "тестовый канал не запустился", None
                 prev_proxy = omni_set_provider_proxy("127.0.0.1", port_base, "socks5")
+                proxy_touched = True
                 omni_reset_cooldown()
                 ok, reason, latency = omni_e2e_check(repeat=2)
                 return ok, reason, latency
@@ -1723,9 +1730,11 @@ class GibVPNApp(QMainWindow):
                 return False, f"ошибка E2E ({type(exc).__name__})", None
             finally:
                 # Сначала вернуть egress OmniRoute, потом убивать тестовый xray.
-                if prev_proxy is not None:
+                # prev_proxy=None — это тоже состояние: прокси был не задан.
+                if proxy_touched:
                     try:
                         omni_restore_proxy(prev_proxy)
+                        clear_proxy_backup()
                     except Exception:
                         pass
                 if proc:
@@ -1863,54 +1872,6 @@ class GibVPNApp(QMainWindow):
                 orig_i, _ = servers_with_index[local_i]
                 mapped.append((orig_i, reachable, avg_ping))
         return mapped
-
-    def _start_background_regular_test(self, regular_pairs, current_best_metric, mode):
-        def worker():
-            try:
-                time.sleep(3.0)
-                if not self.is_running or self._reconnect_in_progress:
-                    return
-
-                self.log(f"[CORE] Background testing {len(regular_pairs)} regular servers...")
-
-                if mode == "min":
-                    reg_results = self._run_ping_test(regular_pairs, kill_existing=False)
-                    if not self.is_running or self._reconnect_in_progress:
-                        return
-                    if not reg_results:
-                        self.log("[CORE] Background test: no regular servers responded")
-                        return
-                    reg_results.sort(key=lambda x: x[1])
-                    best_idx, best_ping = reg_results[0]
-                    self.log(f"[CORE] Background test finished: best regular server #{best_idx} ({int(best_ping * 1000)}ms). Retaining active Favorite server.")
-
-                elif mode == "max":
-                    reg_results = self._run_availability_test(regular_pairs, kill_existing=False)
-                    if not self.is_running or self._reconnect_in_progress:
-                        return
-                    if not reg_results:
-                        self.log("[CORE] Background test: no regular servers responded")
-                        return
-                    reg_results.sort(key=lambda x: (-x[1], x[2]))
-                    best_idx, best_count, best_ping = reg_results[0]
-                    self.log(f"[CORE] Background test finished: best regular server #{best_idx} ({best_count} sites). Retaining active Favorite server.")
-            except Exception as e:
-                log_exception("background regular test crashed")
-                self.log(f"[CORE] Background test error: {e}")
-
-        self._background_thread = threading.Thread(target=worker, daemon=True)
-        self._background_thread.start()
-
-    def _reconnect_to_better(self, server, index, ping_ms, source):
-        if not self.is_running or self._reconnect_in_progress:
-            return
-        self._reconnect_in_progress = True
-        try:
-            self.log(f"[CORE] Better server found in {source}: #{index}, reconnecting...")
-            self.set_status(f"SWITCHING TO #{index}...", "orange")
-            self._start_best_server(server, index, ping_ms, start_watcher=False)
-        finally:
-            self._reconnect_in_progress = False
 
     def _start_best_server(self, best_server, best_index, ping_ms, start_watcher=True, verify_before_tun=False):
         if self.use_tun and not appcore.is_windows_admin():
@@ -2130,7 +2091,7 @@ class GibVPNApp(QMainWindow):
                 self._traffic_up, self._traffic_down = up, down
                 if self.is_running and self._connected_at:
                     self.set_status(self._running_status_text(), "green")
-            time.sleep(3)
+            time.sleep(5)
         if failures:
             self.log("[CORE] Traffic stats polling stopped (API unavailable)")
 
@@ -3132,7 +3093,8 @@ if __name__ == "__main__":
             from agent_api import AgentAPI
             win.agent_api = AgentAPI(win)
             win.agent_api.start()
-            print("[AgentAPI] control-API: http://127.0.0.1:7781")
+            win.log(f"[API] control-API: http://127.0.0.1:7781 "
+                    f"(token: {APP_DIR}\\agent_api.json)")
         except Exception as e:
             log_exception("AgentAPI failed to start")
         if "--start-vpn" in sys.argv:

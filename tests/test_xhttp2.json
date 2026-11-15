@@ -1,0 +1,11 @@
+{
+  "outbounds": [
+    {
+      "protocol": "vless",
+      "settings": {"vnext": [{"address": "1.1.1.1", "port": 443, "users": [{"id": "aabcb15b-3e7b-4a9a-a73e-0d5cc530624a", "encryption": "none"}]}]},
+      "streamSettings": {
+        "network": "xhttp"
+      }
+    }
+  ]
+}

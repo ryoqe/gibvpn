@@ -1,0 +1,12 @@
+{
+  "outbounds": [{"tag": "direct", "protocol": "freedom"}],
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "outboundTag": "direct",
+        "domain": ["domain:ru"]
+      }
+    ]
+  }
+}

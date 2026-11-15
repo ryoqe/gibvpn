@@ -18,6 +18,7 @@ import sys
 import shutil
 import glob
 import hashlib
+import re
 import tempfile
 import urllib.request
 import zipfile
@@ -80,6 +81,37 @@ def ensure_xray():
     print(f"Xray {XRAY_VERSION} installed and hash-verified.")
 
 
+def check_versions():
+    """Fail early when appcore.py, version.txt and the git tag disagree."""
+    with open(os.path.join(WORK_DIR, "appcore.py"), encoding="utf-8") as handle:
+        app_match = re.search(
+            r'CURRENT_APP_VERSION\s*=\s*"([^"]+)"', handle.read()
+        )
+    with open(os.path.join(WORK_DIR, "version.txt"), encoding="utf-8") as handle:
+        file_match = re.search(
+            r"filevers=\((\d+),\s*(\d+),\s*(\d+),\s*(\d+)\)", handle.read()
+        )
+    if not app_match or not file_match:
+        raise RuntimeError("Не удалось определить версию приложения")
+    expected = app_match.group(1)
+    packaged = ".".join(file_match.groups()[:3])
+    if packaged != expected:
+        raise RuntimeError(
+            f"version.txt ({packaged}) не совпадает с appcore ({expected})"
+        )
+    tag = subprocess.run(
+        ["git", "describe", "--tags", "--exact-match", "HEAD"],
+        capture_output=True, text=True, cwd=WORK_DIR,
+    )
+    if tag.returncode == 0:
+        tag_version = tag.stdout.strip().lstrip("vV")
+        if tag_version != expected:
+            raise RuntimeError(
+                f"Тег {tag.stdout.strip()} не совпадает с версией {expected}"
+            )
+    print(f"Version {expected} is consistent.")
+
+
 def run_tests():
     env = os.environ.copy()
     env["QT_QPA_PLATFORM"] = "offscreen"
@@ -139,6 +171,7 @@ def smoke_test_exe():
 
 def main():
     os.chdir(WORK_DIR)
+    check_versions()
     ensure_xray()
     run_tests()
     build_exe()
